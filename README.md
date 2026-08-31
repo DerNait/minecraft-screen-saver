@@ -6,8 +6,35 @@ se desarma, y tras una pausa se genera un terreno nuevo al azar. Ver el pipeline
 completo en `docs/Pipeline Minecraft Screen saver.png`.
 
 - `Secuencial/secuencial.cpp` — un solo hilo construye/actualiza todo el terreno.
-- `Paralelo/paralelo.cpp` — la misma base, preparada para dividir el terreno
-  entre hilos con OpenMP en un avance posterior.
+- `Paralelo/paralelo.cpp` — la misma simulación, con generación y actualización
+  repartidas entre hilos mediante OpenMP.
+
+## Implementación paralela y halo de vegetación
+
+La implementación mantiene la idea del pipeline original: el plano horizontal
+del mundo (`X-Z`) se reparte entre los hilos. El mapa de alturas y los estratos
+se calculan en paralelo con una distribución estática. Para la vegetación se
+forma explícitamente una cuadrícula 2D con un chunk rectangular por hilo. Por
+ejemplo, 12 hilos producen una cuadrícula de `4 x 3` chunks.
+
+Los árboles necesitan un tratamiento adicional porque una copa puede comenzar
+en un chunk y ocupar celdas de los chunks vecinos. Cada hilo extiende dos celdas
+su región de búsqueda en las cuatro direcciones. Esta extensión es el **halo** y
+su tamaño corresponde al radio horizontal máximo de las copas actuales.
+
+La regla de acceso es la siguiente:
+
+- El hilo examina raíces de árboles dentro de su chunk y de su halo.
+- El hilo escribe troncos, hojas o cactus únicamente en las celdas que
+  pertenecen a su propio chunk.
+- Las celdas del halo solo se leen para reconstruir la parte de una copa que
+  entra al chunk; nunca se escriben como territorio vecino.
+
+Así, los árboles no quedan cortados en las fronteras y cada voxel tiene un solo
+hilo escritor. Esto evita carreras de datos sin usar regiones `critical`,
+operaciones `atomic` ni bloqueos. La pequeña repetición de cálculos en los
+bordes es el costo del halo y no cambia el resultado generado para una misma
+semilla.
 
 ## Avance 1 — ubicación en el código
 
