@@ -92,16 +92,23 @@ layout(location = 4) in uint  aFaceTex;    // capas empaquetadas + brillo
 layout(location = 5) in float aInstScale;  // escala de animacion 0..1
 
 uniform mat4 uViewProj;
+uniform mat4 uLightViewProj;
 
 out vec2  vUV;
 flat out float vLayer;
 out float vShade;
+out float vJitter;
+out vec3 vNormal;
+out vec3 vWorldPos;
+out vec4 vLightSpacePosition;
 
 void main() {
     // Escala alrededor del centro del bloque: al aparecer crece de 0 a 1 y al
     // desarmarse encoge de 1 a 0.
     vec3 worldPos = aPos * aInstScale + aInstPos;
     gl_Position = uViewProj * vec4(worldPos, 1.0);
+    vWorldPos = worldPos;
+    vLightSpacePosition = uLightViewProj * vec4(worldPos, 1.0);
 
     // Desempaquetado de las tres capas del atlas.
     uint topLayer    =  aFaceTex        & 0xFFu;
@@ -126,6 +133,14 @@ void main() {
 
     vUV    = aUV;
     vShade = faceShade * jitter;
+    vJitter = jitter;
+
+    // La posicion local permite recuperar el signo de las caras laterales sin
+    // aumentar el tamano de la geometria estatica del cubo.
+    if (aFace < 0.5)       vNormal = vec3(0.0, 1.0, 0.0);
+    else if (aFace < 1.5)  vNormal = vec3(0.0,-1.0, 0.0);
+    else if (aFace < 2.5)  vNormal = vec3(sign(aPos.x), 0.0, 0.0);
+    else                   vNormal = vec3(0.0, 0.0, sign(aPos.z));
 }
 )glsl";
 
@@ -140,16 +155,95 @@ const char* FRAGMENT_SHADER_SRC = R"glsl(
 in vec2  vUV;
 flat in float vLayer;
 in float vShade;
+in float vJitter;
+in vec3 vNormal;
+in vec3 vWorldPos;
+in vec4 vLightSpacePosition;
 
 uniform sampler2DArray uAtlas;
+uniform int uDynamicLighting;
+uniform vec3 uLightDirection;
+uniform vec3 uDiffuseColor;
+uniform vec3 uAmbientColor;
+uniform vec3 uFogColor;
+uniform vec3 uCameraPosition;
+uniform float uFogDensity;
+uniform int uShadows;
+uniform sampler2DShadow uShadowMap;
+uniform float uShadowStrength;
+uniform vec3 uShadowCenter;
+uniform float uShadowRadius;
 
 out vec4 FragColor;
+
+float shadowVisibility(vec3 normal) {
+    vec3 projected = vLightSpacePosition.xyz / vLightSpacePosition.w;
+    projected = projected * 0.5 + 0.5;
+    if (projected.z <= 0.0 || projected.z >= 1.0 ||
+        projected.x <= 0.0 || projected.x >= 1.0 ||
+        projected.y <= 0.0 || projected.y >= 1.0) return 1.0;
+
+    float slope = 1.0 - max(dot(normal, normalize(uLightDirection)), 0.0);
+    float bias = max(0.00035, 0.0018 * slope);
+    vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));
+    float visible = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            visible += texture(uShadowMap,
+                vec3(projected.xy + vec2(x, y) * texel, projected.z - bias));
+        }
+    }
+    return visible / 9.0;
+}
 
 void main() {
     vec4 texel = texture(uAtlas, vec3(vUV, vLayer));
     if (texel.a < 0.5) discard;   // hojas y cactus tienen pixeles vacios
-    FragColor = vec4(texel.rgb * vShade, 1.0);
+
+    if (uDynamicLighting == 0) {
+        FragColor = vec4(texel.rgb * vShade, 1.0);
+        return;
+    }
+
+    vec3 normal = normalize(vNormal);
+    float diffuse = max(dot(normal, normalize(uLightDirection)), 0.0);
+    float directVisibility = 1.0;
+    if (uShadows != 0) {
+        float distanceFromCamera = length(vWorldPos.xz - uShadowCenter.xz);
+        float fade = 1.0 - smoothstep(uShadowRadius * 0.82,
+                                     uShadowRadius, distanceFromCamera);
+        directVisibility = mix(1.0, shadowVisibility(normal),
+                               uShadowStrength * fade);
+    }
+    float skyBounce = 0.10 * max(normal.y, 0.0);
+    vec3 illumination = uAmbientColor +
+        uDiffuseColor * (diffuse * directVisibility + skyBounce);
+    vec3 color = texel.rgb * vJitter * illumination;
+
+    float distanceToCamera = length(vWorldPos - uCameraPosition);
+    float fog = 1.0 - exp(-distanceToCamera * uFogDensity);
+    fog = clamp(fog * fog, 0.0, 0.88);
+    FragColor = vec4(mix(color, uFogColor, fog), 1.0);
 }
+)glsl";
+
+const char* DEPTH_VERTEX_SHADER_SRC = R"glsl(
+#version 330 core
+
+layout(location = 0) in vec3  aPos;
+layout(location = 3) in vec3  aInstPos;
+layout(location = 5) in float aInstScale;
+uniform mat4 uLightViewProj;
+
+void main() {
+    vec3 worldPos = aPos * aInstScale + aInstPos;
+    gl_Position = uLightViewProj * vec4(worldPos, 1.0);
+}
+)glsl";
+
+const char* DEPTH_FRAGMENT_SHADER_SRC = R"glsl(
+#version 330 core
+void main() {}
 )glsl";
 
 // Compila un shader individual e informa el error del compilador.
@@ -208,6 +302,19 @@ bool CubeRenderer::init(std::string& error) {
 
     viewProjLoc_ = glGetUniformLocation(program_, "uViewProj");
     atlasLoc_    = glGetUniformLocation(program_, "uAtlas");
+    dynamicLightingLoc_ = glGetUniformLocation(program_, "uDynamicLighting");
+    lightDirectionLoc_  = glGetUniformLocation(program_, "uLightDirection");
+    diffuseColorLoc_    = glGetUniformLocation(program_, "uDiffuseColor");
+    ambientColorLoc_    = glGetUniformLocation(program_, "uAmbientColor");
+    fogColorLoc_        = glGetUniformLocation(program_, "uFogColor");
+    cameraPositionLoc_  = glGetUniformLocation(program_, "uCameraPosition");
+    fogDensityLoc_      = glGetUniformLocation(program_, "uFogDensity");
+    lightViewProjLoc_   = glGetUniformLocation(program_, "uLightViewProj");
+    shadowsLoc_         = glGetUniformLocation(program_, "uShadows");
+    shadowMapLoc_       = glGetUniformLocation(program_, "uShadowMap");
+    shadowStrengthLoc_  = glGetUniformLocation(program_, "uShadowStrength");
+    shadowCenterLoc_    = glGetUniformLocation(program_, "uShadowCenter");
+    shadowRadiusLoc_    = glGetUniformLocation(program_, "uShadowRadius");
 
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &cubeVbo_);
@@ -256,8 +363,23 @@ bool CubeRenderer::init(std::string& error) {
     return true;
 }
 
+bool CubeRenderer::enableShadowPass(std::string& error) {
+    if (depthProgram_ != 0) return true;
+    depthProgram_ = compileShaderProgram(DEPTH_VERTEX_SHADER_SRC,
+                                         DEPTH_FRAGMENT_SHADER_SRC, error);
+    if (depthProgram_ == 0) return false;
+    depthLightViewProjLoc_ = glGetUniformLocation(depthProgram_, "uLightViewProj");
+    return true;
+}
+
 void CubeRenderer::draw(const InstanceData* instances, size_t count,
                         const glm::mat4& viewProj, GLuint atlasTex) {
+    draw(instances, count, viewProj, atlasTex, SceneLighting{});
+}
+
+void CubeRenderer::draw(const InstanceData* instances, size_t count,
+                        const glm::mat4& viewProj, GLuint atlasTex,
+                        const SceneLighting& lighting) {
     lastUploadBytes_ = 0;
     if (instances == nullptr || count == 0) return;
 
@@ -278,6 +400,26 @@ void CubeRenderer::draw(const InstanceData* instances, size_t count,
 
     glUseProgram(program_);
     glUniformMatrix4fv(viewProjLoc_, 1, GL_FALSE, glm::value_ptr(viewProj));
+    glUniform1i(dynamicLightingLoc_, lighting.dynamic ? 1 : 0);
+    if (lighting.dynamic) {
+        glUniform3fv(lightDirectionLoc_, 1, glm::value_ptr(lighting.direction));
+        glUniform3fv(diffuseColorLoc_, 1, glm::value_ptr(lighting.diffuseColor));
+        glUniform3fv(ambientColorLoc_, 1, glm::value_ptr(lighting.ambientColor));
+        glUniform3fv(fogColorLoc_, 1, glm::value_ptr(lighting.fogColor));
+        glUniform3fv(cameraPositionLoc_, 1, glm::value_ptr(lighting.cameraPosition));
+        glUniform1f(fogDensityLoc_, lighting.fogDensity);
+        glUniformMatrix4fv(lightViewProjLoc_, 1, GL_FALSE,
+                           glm::value_ptr(lighting.lightViewProj));
+        glUniform1i(shadowsLoc_, lighting.shadows ? 1 : 0);
+        glUniform1f(shadowStrengthLoc_, lighting.shadowStrength);
+        glUniform3fv(shadowCenterLoc_, 1, glm::value_ptr(lighting.shadowCenter));
+        glUniform1f(shadowRadiusLoc_, lighting.shadowRadius);
+        if (lighting.shadows) {
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, lighting.shadowTexture);
+            glUniform1i(shadowMapLoc_, 2);
+        }
+    }
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D_ARRAY, atlasTex);
@@ -289,11 +431,40 @@ void CubeRenderer::draw(const InstanceData* instances, size_t count,
     glBindVertexArray(0);
 }
 
+void CubeRenderer::drawDepth(const InstanceData* instances, size_t count,
+                             const glm::mat4& lightViewProj) {
+    if (instances == nullptr || count == 0 || depthProgram_ == 0) return;
+
+    const size_t bytes = count * sizeof(InstanceData);
+    glBindBuffer(GL_ARRAY_BUFFER, instanceVbo_);
+    if (bytes > instanceCapacity_) {
+        instanceCapacity_ = bytes + bytes / 4;
+        glBufferData(GL_ARRAY_BUFFER, instanceCapacity_, nullptr, GL_STREAM_DRAW);
+    }
+    glBufferData(GL_ARRAY_BUFFER, instanceCapacity_, nullptr, GL_STREAM_DRAW);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, bytes, instances);
+
+    glUseProgram(depthProgram_);
+    glUniformMatrix4fv(depthLightViewProjLoc_, 1, GL_FALSE,
+                       glm::value_ptr(lightViewProj));
+    glBindVertexArray(vao_);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, kVerticesPerCube,
+                          static_cast<GLsizei>(count));
+    glBindVertexArray(0);
+}
+
 void CubeRenderer::destroy() {
     if (instanceVbo_ != 0) { glDeleteBuffers(1, &instanceVbo_); instanceVbo_ = 0; }
     if (cubeVbo_     != 0) { glDeleteBuffers(1, &cubeVbo_);     cubeVbo_     = 0; }
     if (vao_         != 0) { glDeleteVertexArrays(1, &vao_);    vao_         = 0; }
     if (program_     != 0) { glDeleteProgram(program_);         program_     = 0; }
+    if (depthProgram_ != 0) { glDeleteProgram(depthProgram_); depthProgram_ = 0; }
+    viewProjLoc_ = atlasLoc_ = -1;
+    dynamicLightingLoc_ = lightDirectionLoc_ = diffuseColorLoc_ = -1;
+    ambientColorLoc_ = fogColorLoc_ = cameraPositionLoc_ = fogDensityLoc_ = -1;
+    lightViewProjLoc_ = shadowsLoc_ = shadowMapLoc_ = shadowStrengthLoc_ = -1;
+    shadowCenterLoc_ = shadowRadiusLoc_ = -1;
+    depthLightViewProjLoc_ = -1;
     instanceCapacity_ = 0;
 }
 

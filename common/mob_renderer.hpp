@@ -15,6 +15,8 @@
 
 namespace mcss {
 
+struct SceneLighting;
+
 struct MobInstanceData {
     float x, y, z; // posicion de los pies en coordenadas del mundo
     float yaw;     // orientacion horizontal en radianes
@@ -32,8 +34,13 @@ enum class MobModel {
 class MobRenderer {
 public:
     bool init(MobModel model, const std::string& texturePath, std::string& error);
+    bool enableShadowPass(std::string& error);
     void draw(const MobInstanceData* instances, size_t count,
               const glm::mat4& viewProj);
+    void draw(const MobInstanceData* instances, size_t count,
+              const glm::mat4& viewProj, const SceneLighting& lighting);
+    void drawDepth(const MobInstanceData* instances, size_t count,
+                   const glm::mat4& lightViewProj);
     void destroy();
 
 private:
@@ -42,8 +49,23 @@ private:
     GLuint instanceVbo_ = 0;
     GLuint texture_     = 0;
     GLuint program_     = 0;
+    GLuint depthProgram_ = 0;
     GLint viewProjLoc_  = -1;
     GLint textureLoc_   = -1;
+    GLint dynamicLightingLoc_ = -1;
+    GLint lightDirectionLoc_  = -1;
+    GLint diffuseColorLoc_    = -1;
+    GLint ambientColorLoc_    = -1;
+    GLint fogColorLoc_        = -1;
+    GLint cameraPositionLoc_  = -1;
+    GLint fogDensityLoc_      = -1;
+    GLint lightViewProjLoc_   = -1;
+    GLint shadowsLoc_         = -1;
+    GLint shadowMapLoc_       = -1;
+    GLint shadowStrengthLoc_  = -1;
+    GLint shadowCenterLoc_    = -1;
+    GLint shadowRadiusLoc_    = -1;
+    GLint depthLightViewProjLoc_ = -1;
     GLsizei vertexCount_ = 0;
     size_t instanceCapacity_ = 0;
 };

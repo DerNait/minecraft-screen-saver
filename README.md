@@ -91,6 +91,57 @@ mediciones existentes del terreno no cambien. En esta primera tanda la IA se
 actualiza secuencialmente; el siguiente paso será separar percepción, propuesta
 y resolución para comparar su actualización secuencial y paralela.
 
+## Iluminación y ciclo de día y noche
+
+La versión paralela incluye un modo visual experimental que reemplaza el
+sombreado fijo por iluminación direccional dinámica. El sol recorre el cielo y
+modifica de forma continua la luz difusa, la luz ambiental, el color de la
+neblina y el tono del horizonte. Durante la noche la luna aporta una luz azul
+suave para que el terreno y los animales sigan siendo visibles.
+
+El cielo se dibuja como un skybox procedural con gradiente atmosférico, brillo
+del sol y la luna, estrellas y nubes cuadradas en movimiento. No necesita
+texturas adicionales. El mismo estado de iluminación se envía a los shaders del
+terreno y de los mobs para que ambos reaccionen al ciclo de forma consistente.
+
+```bash
+./build/paralelo.exe 500000 --lighting cycle
+./build/paralelo.exe 500000 --lighting cycle --day-cycle 30
+./build/paralelo.exe 500000 --threads 12 --camera auto --mobs 30 --hold 60 --lighting cycle
+./build/paralelo.exe 500000 --lighting cycle --shadows near
+./build/paralelo.exe 500000 --lighting cycle --shadows near --shadow-distance 64
+```
+
+`--day-cycle` acepta de 10 a 600 segundos y representa la duración de un ciclo
+completo. El 70 % de ese tiempo corresponde al recorrido diurno y el 30 % al
+nocturno; por ejemplo, un ciclo de 60 segundos usa aproximadamente 42 segundos
+para el día y 18 para la noche. El modo predeterminado continúa siendo
+`--lighting classic`, que no dibuja el skybox y conserva el sombreado anterior
+para poder repetir los benchmarks existentes.
+
+Las sombras cercanas se activan con `--shadows near` y requieren el modo
+`--lighting cycle`. Se usa un mapa de profundidad de `2048 x 2048` centrado en
+la posición horizontal de la cámara. Si la cámara está fuera del terreno, el
+centro se limita al punto más cercano del borde; por ejemplo, una toma exterior
+desde una esquina concentra las sombras en esa esquina y no en el centro del
+mundo. `--shadow-distance` controla un radio de 16 a 128 bloques y su valor
+predeterminado es 48. Aumentar el radio permite que más objetos proyecten
+sombra, pero reparte la misma resolución sobre una superficie mayor y puede
+reducir la nitidez. En el borde del radio las sombras desaparecen gradualmente.
+
+Antes del pase de profundidad, la versión paralela compacta con OpenMP los
+bloques cercanos que pueden proyectar sombra. De esta manera el terreno lejano
+no se vuelve a enviar completo a la GPU. Árboles, relieve, cerdos, vacas y
+ovejas participan en el mapa; el shader aplica un filtro PCF de nueve muestras
+para suavizar ligeramente los bordes pixelados.
+
+El cálculo visual del ciclo no se paraleliza con OpenMP: sus colores se obtienen
+una vez por fotograma en el hilo principal y el trabajo por píxel se ejecuta en
+los shaders de la GPU. OpenGL permanece fuera de las regiones paralelas, igual
+que en el resto del pipeline. La selección y compactación de los bloques
+cercanos para las sombras sí se reparte entre los hilos, pero la creación del
+mapa de profundidad continúa ejecutándose en la GPU desde el hilo principal.
+
 ## Avance 1 — ubicación en el código
 
 - **Variable en memoria que almacena los elementos a renderizar**:

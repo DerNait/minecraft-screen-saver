@@ -71,6 +71,10 @@ void printUsage(const char* programName) {
         "  --camera <modo>       orbit | auto.               (solo paralelo, def. orbit)\n"
         "  --camera-change <s>   Segundos entre encuadres.   (2 - 120, def. 10)\n"
         "  --mobs <n>            Cantidad de animales.      (0 - 5000, def. 0)\n"
+        "  --lighting <modo>     classic | cycle.            (solo paralelo, def. classic)\n"
+        "  --day-cycle <s>       Ciclo total: 70%% dia, 30%% noche. (10 - 600, def. 60)\n"
+        "  --shadows <modo>      off | near.                 (solo paralelo, def. off)\n"
+        "  --shadow-distance <n> Radio local de sombras.     (16 - 128, def. 48)\n"
         "  --help                Muestra esta ayuda.\n"
         "\n"
         "Ejemplos:\n"
@@ -234,6 +238,40 @@ bool parseArguments(int argc, char** argv, AppConfig& config, std::string& error
                 return false;
             }
             config.mobCount = static_cast<int>(v);
+
+        } else if (std::strcmp(opt, "--lighting") == 0) {
+            if (std::strcmp(value, "classic") != 0 &&
+                std::strcmp(value, "cycle") != 0) {
+                error = outOfRange("--lighting", value, "'classic' o 'cycle'");
+                return false;
+            }
+            config.lightingMode = value;
+
+        } else if (std::strcmp(opt, "--day-cycle") == 0) {
+            float v = 0.0f;
+            if (!parseFloat(value, v) || v < 10.0f || v > 600.0f) {
+                error = outOfRange("--day-cycle", value,
+                                   "un numero entre 10 y 600");
+                return false;
+            }
+            config.dayCycleSeconds = v;
+
+        } else if (std::strcmp(opt, "--shadows") == 0) {
+            if (std::strcmp(value, "off") != 0 &&
+                std::strcmp(value, "near") != 0) {
+                error = outOfRange("--shadows", value, "'off' o 'near'");
+                return false;
+            }
+            config.shadowMode = value;
+
+        } else if (std::strcmp(opt, "--shadow-distance") == 0) {
+            float v = 0.0f;
+            if (!parseFloat(value, v) || v < 16.0f || v > 128.0f) {
+                error = outOfRange("--shadow-distance", value,
+                                   "un numero entre 16 y 128");
+                return false;
+            }
+            config.shadowDistance = v;
 
         } else if (std::strcmp(opt, "--assets") == 0) {
             config.assetsDir = value;

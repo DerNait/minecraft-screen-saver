@@ -44,6 +44,24 @@ inline uint32_t packFaceTex(int topLayer, int sideLayer, int bottomLayer, uint8_
          | (static_cast<uint32_t>(shade) << 24);
 }
 
+// Estado compartido por los shaders del terreno y los mobs. Cuando dynamic es
+// false se conserva exactamente el sombreado clasico por orientacion de cara.
+struct SceneLighting {
+    bool      dynamic = false;
+    glm::vec3 direction{0.45f, 1.0f, 0.30f}; // desde la superficie hacia el astro
+    glm::vec3 diffuseColor{1.0f, 1.0f, 1.0f};
+    glm::vec3 ambientColor{1.0f, 1.0f, 1.0f};
+    glm::vec3 fogColor{0.53f, 0.81f, 0.92f};
+    glm::vec3 cameraPosition{0.0f};
+    float     fogDensity = 0.0f;
+    bool      shadows = false;
+    glm::mat4 lightViewProj{1.0f};
+    GLuint    shadowTexture = 0;
+    float     shadowStrength = 0.68f;
+    glm::vec3 shadowCenter{0.0f};
+    float     shadowRadius = 1.0f;
+};
+
 class CubeRenderer {
 public:
     // ------------------------------------------------------------------------
@@ -54,6 +72,10 @@ public:
     //  unitario y configura el VAO con los atributos por vertice y por instancia.
     // ------------------------------------------------------------------------
     bool init(std::string& error);
+
+    // Compila el pase de profundidad solo cuando la version paralela activa
+    // sombras. El ejecutable secuencial no paga este costo de inicializacion.
+    bool enableShadowPass(std::string& error);
 
     // ------------------------------------------------------------------------
     //  draw
@@ -67,6 +89,15 @@ public:
     void draw(const InstanceData* instances, size_t count,
               const glm::mat4& viewProj, GLuint atlasTex);
 
+    // Variante usada por la version paralela para compartir el sol, la luz
+    // ambiental y la neblina del ciclo dia/noche con todos los objetos.
+    void draw(const InstanceData* instances, size_t count,
+              const glm::mat4& viewProj, GLuint atlasTex,
+              const SceneLighting& lighting);
+
+    void drawDepth(const InstanceData* instances, size_t count,
+                   const glm::mat4& lightViewProj);
+
     // Libera VAO, VBOs y el programa de shaders. Es seguro llamarla dos veces.
     void destroy();
 
@@ -78,8 +109,23 @@ private:
     GLuint cubeVbo_      = 0;  // geometria estatica del cubo unitario
     GLuint instanceVbo_  = 0;  // datos por instancia, reescritos cada fotograma
     GLuint program_      = 0;  // programa de shaders
+    GLuint depthProgram_ = 0;  // programa opcional del mapa de sombras
     GLint  viewProjLoc_  = -1; // ubicacion del uniform de la matriz
     GLint  atlasLoc_     = -1; // ubicacion del uniform del muestreador
+    GLint  dynamicLightingLoc_ = -1;
+    GLint  lightDirectionLoc_  = -1;
+    GLint  diffuseColorLoc_    = -1;
+    GLint  ambientColorLoc_    = -1;
+    GLint  fogColorLoc_        = -1;
+    GLint  cameraPositionLoc_  = -1;
+    GLint  fogDensityLoc_      = -1;
+    GLint  lightViewProjLoc_   = -1;
+    GLint  shadowsLoc_         = -1;
+    GLint  shadowMapLoc_       = -1;
+    GLint  shadowStrengthLoc_  = -1;
+    GLint  shadowCenterLoc_    = -1;
+    GLint  shadowRadiusLoc_    = -1;
+    GLint  depthLightViewProjLoc_ = -1;
     size_t instanceCapacity_ = 0;  // capacidad reservada del buffer de instancias
     size_t lastUploadBytes_  = 0;
 };

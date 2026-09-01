@@ -16,6 +16,7 @@
 //    2. buildBlockList()        - compactacion determinista por prefijos
 //    3. updateWorld()           - fisica con reduccion de bloques vivos
 //    4. buildInstanceBuffer()   - compactacion determinista por prefijos
+//    5. buildNearbyShadowInstances() - casters locales para el shadow map
 //
 //  Los mobs opcionales comienzan con una IA secuencial para establecer el
 //  comportamiento de referencia antes de paralelizarla en la siguiente tanda.
@@ -47,6 +48,8 @@
 #include "mob_renderer.hpp"
 #include "noise.hpp"
 #include "render.hpp"
+#include "shadow_map.hpp"
+#include "sky_renderer.hpp"
 #include "texture_atlas.hpp"
 
 using namespace mcss;
@@ -308,6 +311,117 @@ static CameraView calculateCamera(const World& world, const AppConfig& cfg, doub
     current.up = glm::normalize(previous.up * (1.0f - t) + current.up * t);
     current.fovDegrees = previous.fovDegrees * (1.0f - t) + current.fovDegrees * t;
     return current;
+}
+
+// ============================================================================
+//  ILUMINACION Y CICLO DE DIA/NOCHE
+// ============================================================================
+
+struct DayNightEnvironment {
+    SceneLighting lighting;
+    SkyEnvironment sky;
+    const char* phaseName;
+};
+
+static float smoothRange(float edge0, float edge1, float value) {
+    float t = std::max(0.0f, std::min(1.0f, (value - edge0) / (edge1 - edge0)));
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static glm::vec3 rgbColor(uint32_t color) {
+    return glm::vec3(((color >> 16) & 0xFF) / 255.0f,
+                     ((color >> 8)  & 0xFF) / 255.0f,
+                     ( color        & 0xFF) / 255.0f);
+}
+
+// El ciclo comienza al mediodia para que el mundo sea visible desde el primer
+// fotograma. El arco diurno ocupa 70% del tiempo total y el nocturno 30%; ambos
+// conservan continuidad en el horizonte aunque avancen a velocidades distintas.
+static DayNightEnvironment calculateDayNight(const World& world,
+                                              const AppConfig& cfg,
+                                              double now,
+                                              const glm::vec3& cameraPosition) {
+    constexpr float kTwoPi = 6.28318530f;
+    constexpr float kPi = 3.14159265f;
+    constexpr float kDayFraction = 0.70f;
+    constexpr float kNightFraction = 1.0f - kDayFraction;
+    constexpr float kHalfDay = kDayFraction * 0.5f;
+    const float cycle = static_cast<float>(
+        std::fmod(now / static_cast<double>(cfg.dayCycleSeconds), 1.0));
+    float angle = 0.0f;
+    if (cycle < kHalfDay) {
+        // Mediodia -> atardecer: primer 35% del ciclo.
+        angle = kPi * 0.5f + (cycle / kHalfDay) * kPi * 0.5f;
+    } else if (cycle < kHalfDay + kNightFraction) {
+        // Atardecer -> amanecer: la noche completa ocupa 30%.
+        const float nightProgress =
+            (cycle - kHalfDay) / kNightFraction;
+        angle = kPi + nightProgress * kPi;
+    } else {
+        // Amanecer -> mediodia: ultimo 35%, cerrando el ciclo sin salto.
+        const float morningProgress =
+            (cycle - kHalfDay - kNightFraction) / kHalfDay;
+        angle = kTwoPi + morningProgress * kPi * 0.5f;
+    }
+    const glm::vec3 sunDirection = glm::normalize(
+        glm::vec3(std::cos(angle), std::sin(angle), 0.32f));
+
+    const float daylight = smoothRange(-0.16f, 0.14f, sunDirection.y);
+    const float night = 1.0f - smoothRange(-0.20f, 0.08f, sunDirection.y);
+    const float sunsetStrength =
+        (1.0f - smoothRange(0.02f, 0.38f, std::abs(sunDirection.y))) *
+        (0.35f + daylight * 0.65f);
+
+    const glm::vec3 biomeSky = rgbColor(world.biome->skyColor);
+    const glm::vec3 dayZenith = glm::mix(biomeSky,
+                                         glm::vec3(0.18f, 0.48f, 0.92f), 0.40f);
+    const glm::vec3 dayHorizon = glm::mix(biomeSky,
+                                          glm::vec3(0.90f, 0.95f, 1.0f), 0.50f);
+    const glm::vec3 nightZenith(0.006f, 0.010f, 0.050f);
+    const glm::vec3 nightHorizon(0.025f, 0.045f, 0.115f);
+
+    DayNightEnvironment environment{};
+    environment.sky.zenithColor = glm::mix(nightZenith, dayZenith, daylight);
+    environment.sky.horizonColor = glm::mix(nightHorizon, dayHorizon, daylight);
+    environment.sky.sunDirection = sunDirection;
+    environment.sky.sunColor = glm::mix(glm::vec3(1.0f, 0.42f, 0.16f),
+                                        glm::vec3(1.0f, 0.94f, 0.74f),
+                                        smoothRange(0.02f, 0.48f, sunDirection.y));
+    environment.sky.moonColor = glm::vec3(0.72f, 0.82f, 1.0f);
+    environment.sky.sunsetColor = glm::vec3(1.0f, 0.20f, 0.035f);
+    environment.sky.daylight = daylight;
+    environment.sky.starVisibility = night;
+    environment.sky.sunsetStrength = sunsetStrength;
+    environment.sky.timeSeconds = static_cast<float>(now);
+
+    environment.lighting.dynamic = true;
+    environment.lighting.direction =
+        sunDirection.y > -0.12f ? sunDirection : -sunDirection;
+    environment.lighting.ambientColor = glm::mix(
+        glm::vec3(0.14f, 0.16f, 0.23f),
+        glm::vec3(0.42f, 0.43f, 0.43f), daylight);
+    environment.lighting.ambientColor +=
+        glm::vec3(0.10f, 0.055f, 0.025f) * sunsetStrength;
+    const glm::vec3 daylightColor = glm::mix(
+        glm::vec3(1.0f, 0.40f, 0.16f),
+        glm::vec3(0.72f, 0.70f, 0.66f),
+        smoothRange(0.02f, 0.45f, sunDirection.y));
+    environment.lighting.diffuseColor = glm::mix(
+        glm::vec3(0.20f, 0.23f, 0.34f), daylightColor, daylight);
+    environment.lighting.fogColor = environment.sky.horizonColor +
+        environment.sky.sunsetColor * sunsetStrength * 0.18f;
+    environment.lighting.cameraPosition = cameraPosition;
+    environment.lighting.fogDensity =
+        1.0f / std::max(85.0f, static_cast<float>(world.side) * 2.2f);
+
+    if (sunDirection.y > 0.22f) {
+        environment.phaseName = "dia";
+    } else if (sunDirection.y > -0.16f) {
+        environment.phaseName = std::cos(angle) < 0.0f ? "atardecer" : "amanecer";
+    } else {
+        environment.phaseName = "noche";
+    }
+    return environment;
 }
 
 // ============================================================================
@@ -1050,6 +1164,97 @@ static size_t buildInstanceBuffer(const World& world, const uint32_t* faceTex,
     return visibleTotal;
 }
 
+struct NearShadowView {
+    glm::mat4 lightViewProj{1.0f};
+    glm::vec3 focus{0.0f};
+    float radius = 0.0f;
+};
+
+// Centra el volumen de sombras en la posicion horizontal de la camara. Cuando
+// una toma queda fuera del terreno se usa el punto mas cercano del borde; asi
+// una camara exterior concentra la resolucion en la esquina o lado que ocupa,
+// no en el centro que esta observando.
+static NearShadowView calculateNearShadowView(const World& world,
+                                               const AppConfig& cfg,
+                                               const CameraView& camera,
+                                               const SceneLighting& lighting) {
+    const float worldHalf = std::max(1.0f, world.side * 0.5f - 1.0f);
+    NearShadowView result{};
+    result.focus.x = std::max(-worldHalf, std::min(worldHalf, camera.eye.x));
+    result.focus.z = std::max(-worldHalf, std::min(worldHalf, camera.eye.z));
+    result.focus.y = terrainTopAt(world, result.focus.x, result.focus.z) +
+                     std::max(3.0f, world.height * 0.10f);
+    result.radius = std::min(cfg.shadowDistance,
+                             std::max(18.0f, world.side * 0.70f));
+
+    const glm::vec3 lightDirection = glm::normalize(lighting.direction);
+    const float lightDistance = result.radius * 2.8f + world.height;
+    const glm::vec3 lightEye = result.focus + lightDirection * lightDistance;
+    const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
+    const glm::vec3 lightUp = std::abs(glm::dot(lightDirection, worldUp)) > 0.92f
+                            ? glm::vec3(0.0f, 0.0f, 1.0f)
+                            : worldUp;
+    const glm::mat4 lightView = glm::lookAt(lightEye, result.focus, lightUp);
+    const glm::mat4 lightProjection = glm::ortho(
+        -result.radius, result.radius, -result.radius, result.radius,
+        0.5f, lightDistance + result.radius * 2.5f + world.height);
+    result.lightViewProj = lightProjection * lightView;
+    return result;
+}
+
+// Compactacion paralela estable de los bloques que pueden proyectar sombras en
+// la zona local. Cada hilo escribe en un rango exclusivo calculado por prefijo.
+static size_t buildNearbyShadowInstances(const InstanceData* source,
+                                         size_t count,
+                                         const glm::vec3& focus,
+                                         float radius,
+                                         std::vector<InstanceData>& output) {
+    std::vector<size_t> prefix(static_cast<size_t>(omp_get_max_threads()) + 1, 0);
+    const float paddedRadius = radius + 6.0f;
+    const float radiusSquared = paddedRadius * paddedRadius;
+    size_t nearbyTotal = 0;
+
+    #pragma omp parallel shared(nearbyTotal, output)
+    {
+        const int threadId = omp_get_thread_num();
+        const int threadCount = omp_get_num_threads();
+        const size_t begin = count * static_cast<size_t>(threadId) /
+                             static_cast<size_t>(threadCount);
+        const size_t end = count * static_cast<size_t>(threadId + 1) /
+                           static_cast<size_t>(threadCount);
+
+        size_t localCount = 0;
+        for (size_t i = begin; i < end; ++i) {
+            const float dx = source[i].x - focus.x;
+            const float dz = source[i].z - focus.z;
+            if (dx * dx + dz * dz <= radiusSquared) ++localCount;
+        }
+        prefix[static_cast<size_t>(threadId) + 1] = localCount;
+
+        #pragma omp barrier
+        #pragma omp single
+        {
+            for (int t = 0; t < threadCount; ++t) {
+                prefix[static_cast<size_t>(t) + 1] += prefix[static_cast<size_t>(t)];
+            }
+            nearbyTotal = prefix[static_cast<size_t>(threadCount)];
+            output.resize(nearbyTotal);
+        }
+        #pragma omp barrier
+
+        size_t writeIndex = prefix[static_cast<size_t>(threadId)];
+        for (size_t i = begin; i < end; ++i) {
+            const float dx = source[i].x - focus.x;
+            const float dz = source[i].z - focus.z;
+            if (dx * dx + dz * dz <= radiusSquared) {
+                output[writeIndex++] = source[i];
+            }
+        }
+    }
+
+    return nearbyTotal;
+}
+
 // ============================================================================
 //  PREPARACION DEL ATLAS
 // ============================================================================
@@ -1104,6 +1309,11 @@ int main(int argc, char** argv) {
     if (cfg.showHelp) {
         printUsage(argv[0]);
         return EXIT_SUCCESS;
+    }
+    if (cfg.shadowMode == "near" && cfg.lightingMode != "cycle") {
+        std::fprintf(stderr,
+                     "Error: --shadows near requiere --lighting cycle.\n");
+        return EXIT_FAILURE;
     }
     // Se desactiva el ajuste dinamico para que --threads sea reproducible en
     // las mediciones. Sin la opcion se usa la cantidad maxima del sistema.
@@ -1192,6 +1402,33 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    const bool dynamicLighting = cfg.lightingMode == "cycle";
+    const bool shadowsEnabled = dynamicLighting && cfg.shadowMode == "near";
+    SkyRenderer skyRenderer;
+    if (dynamicLighting && !skyRenderer.init(error)) {
+        std::fprintf(stderr, "Error al preparar el skybox: %s\n", error.c_str());
+        renderer.destroy();
+        atlas.destroy();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
+
+    constexpr int kShadowMapResolution = 2048;
+    ShadowMap shadowMap;
+    if (shadowsEnabled &&
+        (!shadowMap.init(kShadowMapResolution, error) ||
+         !renderer.enableShadowPass(error))) {
+        std::fprintf(stderr, "Error al preparar las sombras: %s\n", error.c_str());
+        shadowMap.destroy();
+        skyRenderer.destroy();
+        renderer.destroy();
+        atlas.destroy();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
+
     MobRenderer pigRenderer;
     MobRenderer cowRenderer;
     MobRenderer sheepRenderer;
@@ -1204,12 +1441,18 @@ int main(int argc, char** argv) {
          !sheepRenderer.init(MobModel::Sheep,
                              assetsDir + "/entity/sheep/sheep.png", error) ||
          !sheepWoolRenderer.init(MobModel::SheepWool,
-                                 assetsDir + "/entity/sheep/sheep_wool.png", error))) {
+                                 assetsDir + "/entity/sheep/sheep_wool.png", error) ||
+         (shadowsEnabled &&
+          (!pigRenderer.enableShadowPass(error) ||
+           !cowRenderer.enableShadowPass(error) ||
+           !sheepRenderer.enableShadowPass(error))))) {
         std::fprintf(stderr, "Error al preparar los mobs: %s\n", error.c_str());
         sheepWoolRenderer.destroy();
         sheepRenderer.destroy();
         cowRenderer.destroy();
         pigRenderer.destroy();
+        shadowMap.destroy();
+        skyRenderer.destroy();
         renderer.destroy();
         atlas.destroy();
         glfwDestroyWindow(window);
@@ -1230,6 +1473,18 @@ int main(int argc, char** argv) {
     }
     std::printf("Mobs       : %d solicitados | cerdos, vacas y ovejas | IA secuencial%s\n",
                 cfg.mobCount, cfg.mobCount == 0 ? " (desactivados)" : "");
+    if (dynamicLighting) {
+        std::printf("Iluminacion: ciclo dia/noche | %.1f s | skybox procedural\n",
+                    cfg.dayCycleSeconds);
+    } else {
+        std::printf("Iluminacion: clasica (use --lighting cycle para activar el ciclo)\n");
+    }
+    if (shadowsEnabled) {
+        std::printf("Sombras    : cercanas | radio %.1f bloques | mapa %dx%d\n",
+                    cfg.shadowDistance, shadowMap.resolution(), shadowMap.resolution());
+    } else {
+        std::printf("Sombras    : desactivadas (use --shadows near con iluminacion cycle)\n");
+    }
 
     // --- 5. Generacion del primer mundo --------------------------------------
     // Semilla: la indicada por el usuario, o una sorteada por el sistema.
@@ -1240,6 +1495,7 @@ int main(int argc, char** argv) {
     double genMs = generateWorld(cfg, seed, world);
 
     std::vector<InstanceData> instances(world.blocks.size());
+    std::vector<InstanceData> shadowInstances;
     std::vector<Mob> mobs;
     std::vector<MobInstanceData> pigInstances;
     std::vector<MobInstanceData> cowInstances;
@@ -1306,6 +1562,7 @@ int main(int argc, char** argv) {
             seed = (cfg.seed != 0) ? cfg.seed : randomDevice();
             genMs = generateWorld(cfg, seed, world);
             instances.assign(world.blocks.size(), InstanceData{});
+            shadowInstances.clear();
             mobs.clear();
             pigInstances.clear();
             cowInstances.clear();
@@ -1348,18 +1605,40 @@ int main(int argc, char** argv) {
         drawnBlocks = buildInstanceBuffer(world, faceTexTables[world.biomeIndex].data(),
                                           instances.data());
 
-        cpuMsAccum += std::chrono::duration<double, std::milli>(
-                          std::chrono::steady_clock::now() - cpuStart).count();
-
         // --- Camara ----------------------------------------------------------
         // El modo orbit conserva la toma original. El modo auto alterna entre
         // encuadres exteriores e interiores con una transicion elevada.
+        CameraView camera = calculateCamera(world, cfg, now);
+
+        DayNightEnvironment environment{};
+        environment.phaseName = "clasica";
+        if (dynamicLighting) {
+            environment = calculateDayNight(world, cfg, now, camera.eye);
+        }
+
+        NearShadowView shadowView{};
+        size_t shadowBlockCount = 0;
+        if (shadowsEnabled) {
+            shadowView = calculateNearShadowView(world, cfg, camera,
+                                                 environment.lighting);
+            shadowBlockCount = buildNearbyShadowInstances(
+                instances.data(), drawnBlocks, shadowView.focus,
+                shadowView.radius, shadowInstances);
+            environment.lighting.shadows = true;
+            environment.lighting.lightViewProj = shadowView.lightViewProj;
+            environment.lighting.shadowTexture = shadowMap.textureId();
+            environment.lighting.shadowStrength = 0.72f;
+            environment.lighting.shadowCenter = shadowView.focus;
+            environment.lighting.shadowRadius = shadowView.radius;
+        }
+
+        cpuMsAccum += std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - cpuStart).count();
+
         int fbWidth = 0, fbHeight = 0;
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbHeight == 0) fbHeight = 1;
         glViewport(0, 0, fbWidth, fbHeight);
-
-        CameraView camera = calculateCamera(world, cfg, now);
 
         glm::mat4 projection = glm::perspective(
             glm::radians(camera.fovDegrees),
@@ -1369,17 +1648,40 @@ int main(int argc, char** argv) {
         glm::mat4 viewProj = projection * view;
 
         // --- Dibujo -----------------------------------------------------------
-        uint32_t sky = world.biome->skyColor;
-        glClearColor(((sky >> 16) & 0xFF) / 255.0f,
-                     ((sky >> 8)  & 0xFF) / 255.0f,
-                     ( sky        & 0xFF) / 255.0f, 1.0f);
+        if (shadowsEnabled) {
+            shadowMap.beginDepthPass();
+            renderer.drawDepth(shadowInstances.data(), shadowBlockCount,
+                               shadowView.lightViewProj);
+            pigRenderer.drawDepth(pigInstances.data(), pigInstances.size(),
+                                  shadowView.lightViewProj);
+            cowRenderer.drawDepth(cowInstances.data(), cowInstances.size(),
+                                  shadowView.lightViewProj);
+            sheepRenderer.drawDepth(sheepInstances.data(), sheepInstances.size(),
+                                    shadowView.lightViewProj);
+            shadowMap.endDepthPass(fbWidth, fbHeight);
+        }
+
+        if (dynamicLighting) {
+            glClearColor(environment.sky.zenithColor.r,
+                         environment.sky.zenithColor.g,
+                         environment.sky.zenithColor.b, 1.0f);
+        } else {
+            const glm::vec3 skyColor = rgbColor(world.biome->skyColor);
+            glClearColor(skyColor.r, skyColor.g, skyColor.b, 1.0f);
+        }
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        renderer.draw(instances.data(), drawnBlocks, viewProj, atlas.textureId());
-        pigRenderer.draw(pigInstances.data(), pigInstances.size(), viewProj);
-        cowRenderer.draw(cowInstances.data(), cowInstances.size(), viewProj);
-        sheepRenderer.draw(sheepInstances.data(), sheepInstances.size(), viewProj);
-        sheepWoolRenderer.draw(sheepInstances.data(), sheepInstances.size(), viewProj);
+        if (dynamicLighting) skyRenderer.draw(projection, view, environment.sky);
+        renderer.draw(instances.data(), drawnBlocks, viewProj, atlas.textureId(),
+                      environment.lighting);
+        pigRenderer.draw(pigInstances.data(), pigInstances.size(), viewProj,
+                         environment.lighting);
+        cowRenderer.draw(cowInstances.data(), cowInstances.size(), viewProj,
+                         environment.lighting);
+        sheepRenderer.draw(sheepInstances.data(), sheepInstances.size(), viewProj,
+                           environment.lighting);
+        sheepWoolRenderer.draw(sheepInstances.data(), sheepInstances.size(), viewProj,
+                               environment.lighting);
         glfwSwapBuffers(window);
 
         // --- Indicador de FPS en el titulo de la ventana ----------------------
@@ -1393,10 +1695,10 @@ int main(int argc, char** argv) {
 
             char title[256];
             std::snprintf(title, sizeof(title),
-                          "Minecraft Screen Saver - Paralelo | %d hilos | FPS %d | %s | cam %s | "
+                          "Minecraft Screen Saver - Paralelo | %d hilos | FPS %d | %s | cam %s | luz %s | "
                           "bloques %zu / dibujados %zu | mobs %zu | CPU %.2f ms | %s",
                           openmpThreads, displayedFps, world.biome->name,
-                          camera.name,
+                          camera.name, environment.phaseName,
                           world.blocks.size(), drawnBlocks,
                           pigInstances.size() + cowInstances.size() + sheepInstances.size(),
                           cpuMsAccum / frameCount, phaseName);
@@ -1413,6 +1715,8 @@ int main(int argc, char** argv) {
     sheepRenderer.destroy();
     cowRenderer.destroy();
     pigRenderer.destroy();
+    shadowMap.destroy();
+    skyRenderer.destroy();
     renderer.destroy();
     atlas.destroy();
     glfwDestroyWindow(window);

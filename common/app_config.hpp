@@ -39,6 +39,10 @@ struct AppConfig {
     std::string cameraMode = "orbit"; // orbit = camara original, auto = encuadres automaticos
     float       cameraChangeSeconds = 10.0f; // intervalo entre encuadres automaticos
     int         mobCount = 0;      // mobs activos; 0 conserva el benchmark de terreno
+    std::string lightingMode = "classic"; // classic = original, cycle = dia/noche
+    float       dayCycleSeconds = 60.0f; // duracion de un dia completo en modo cycle
+    std::string shadowMode = "off"; // off = sin pase extra, near = sombras locales
+    float       shadowDistance = 48.0f; // radio en bloques alrededor de la vista
     bool        showHelp = false; // el usuario pidio la ayuda
 };
 

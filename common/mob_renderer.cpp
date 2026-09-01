@@ -237,9 +237,13 @@ layout(location = 4) in float aYaw;
 layout(location = 5) in float aBob;
 
 uniform mat4 uViewProj;
+uniform mat4 uLightViewProj;
 
 out vec2 vUV;
 out float vShade;
+out vec3 vNormal;
+out vec3 vWorldPos;
+out vec4 vLightSpacePosition;
 
 void main() {
     float c = cos(aYaw);
@@ -252,9 +256,12 @@ void main() {
                                 -s * aNormal.x + c * aNormal.z));
     vec3 worldPos = local + aInstPos;
     gl_Position = uViewProj * vec4(worldPos, 1.0);
+    vLightSpacePosition = uLightViewProj * vec4(worldPos, 1.0);
 
     vec3 lightDir = normalize(vec3(0.45, 1.0, 0.30));
     vShade = 0.48 + 0.52 * max(dot(normal, lightDir), 0.0);
+    vNormal = normal;
+    vWorldPos = worldPos;
     vUV = aUV;
 }
 )glsl";
@@ -264,14 +271,97 @@ const char* MOB_FRAGMENT_SHADER = R"glsl(
 
 in vec2 vUV;
 in float vShade;
+in vec3 vNormal;
+in vec3 vWorldPos;
+in vec4 vLightSpacePosition;
 uniform sampler2D uTexture;
+uniform int uDynamicLighting;
+uniform vec3 uLightDirection;
+uniform vec3 uDiffuseColor;
+uniform vec3 uAmbientColor;
+uniform vec3 uFogColor;
+uniform vec3 uCameraPosition;
+uniform float uFogDensity;
+uniform int uShadows;
+uniform sampler2DShadow uShadowMap;
+uniform float uShadowStrength;
+uniform vec3 uShadowCenter;
+uniform float uShadowRadius;
 out vec4 FragColor;
+
+float shadowVisibility(vec3 normal) {
+    vec3 projected = vLightSpacePosition.xyz / vLightSpacePosition.w;
+    projected = projected * 0.5 + 0.5;
+    if (projected.z <= 0.0 || projected.z >= 1.0 ||
+        projected.x <= 0.0 || projected.x >= 1.0 ||
+        projected.y <= 0.0 || projected.y >= 1.0) return 1.0;
+
+    float slope = 1.0 - max(dot(normal, normalize(uLightDirection)), 0.0);
+    float bias = max(0.00035, 0.0018 * slope);
+    vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));
+    float visible = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            visible += texture(uShadowMap,
+                vec3(projected.xy + vec2(x, y) * texel, projected.z - bias));
+        }
+    }
+    return visible / 9.0;
+}
 
 void main() {
     vec4 texel = texture(uTexture, vUV);
     if (texel.a < 0.5) discard;
-    FragColor = vec4(texel.rgb * vShade, texel.a);
+
+    if (uDynamicLighting == 0) {
+        FragColor = vec4(texel.rgb * vShade, texel.a);
+        return;
+    }
+
+    vec3 normal = normalize(vNormal);
+    float diffuse = max(dot(normal, normalize(uLightDirection)), 0.0);
+    float directVisibility = 1.0;
+    if (uShadows != 0) {
+        float distanceFromCamera = length(vWorldPos.xz - uShadowCenter.xz);
+        float fade = 1.0 - smoothstep(uShadowRadius * 0.82,
+                                     uShadowRadius, distanceFromCamera);
+        directVisibility = mix(1.0, shadowVisibility(normal),
+                               uShadowStrength * fade);
+    }
+    float skyBounce = 0.10 * max(normal.y, 0.0);
+    vec3 illumination = uAmbientColor +
+        uDiffuseColor * (diffuse * directVisibility + skyBounce);
+    vec3 color = texel.rgb * illumination;
+
+    float distanceToCamera = length(vWorldPos - uCameraPosition);
+    float fog = 1.0 - exp(-distanceToCamera * uFogDensity);
+    fog = clamp(fog * fog, 0.0, 0.88);
+    FragColor = vec4(mix(color, uFogColor, fog), texel.a);
 }
+)glsl";
+
+const char* MOB_DEPTH_VERTEX_SHADER = R"glsl(
+#version 330 core
+
+layout(location = 0) in vec3 aPos;
+layout(location = 3) in vec3 aInstPos;
+layout(location = 4) in float aYaw;
+layout(location = 5) in float aBob;
+uniform mat4 uLightViewProj;
+
+void main() {
+    float c = cos(aYaw);
+    float s = sin(aYaw);
+    vec3 local = vec3(c * aPos.x + s * aPos.z,
+                      aPos.y + aBob,
+                     -s * aPos.x + c * aPos.z);
+    gl_Position = uLightViewProj * vec4(local + aInstPos, 1.0);
+}
+)glsl";
+
+const char* MOB_DEPTH_FRAGMENT_SHADER = R"glsl(
+#version 330 core
+void main() {}
 )glsl";
 
 } // namespace
@@ -340,6 +430,19 @@ bool MobRenderer::init(MobModel model, const std::string& texturePath, std::stri
 
     viewProjLoc_ = glGetUniformLocation(program_, "uViewProj");
     textureLoc_ = glGetUniformLocation(program_, "uTexture");
+    dynamicLightingLoc_ = glGetUniformLocation(program_, "uDynamicLighting");
+    lightDirectionLoc_  = glGetUniformLocation(program_, "uLightDirection");
+    diffuseColorLoc_    = glGetUniformLocation(program_, "uDiffuseColor");
+    ambientColorLoc_    = glGetUniformLocation(program_, "uAmbientColor");
+    fogColorLoc_        = glGetUniformLocation(program_, "uFogColor");
+    cameraPositionLoc_  = glGetUniformLocation(program_, "uCameraPosition");
+    fogDensityLoc_      = glGetUniformLocation(program_, "uFogDensity");
+    lightViewProjLoc_   = glGetUniformLocation(program_, "uLightViewProj");
+    shadowsLoc_         = glGetUniformLocation(program_, "uShadows");
+    shadowMapLoc_       = glGetUniformLocation(program_, "uShadowMap");
+    shadowStrengthLoc_  = glGetUniformLocation(program_, "uShadowStrength");
+    shadowCenterLoc_    = glGetUniformLocation(program_, "uShadowCenter");
+    shadowRadiusLoc_    = glGetUniformLocation(program_, "uShadowRadius");
     if (glGetError() != GL_NO_ERROR) {
         error = "OpenGL no pudo preparar el renderizador de mobs";
         destroy();
@@ -348,8 +451,23 @@ bool MobRenderer::init(MobModel model, const std::string& texturePath, std::stri
     return true;
 }
 
+bool MobRenderer::enableShadowPass(std::string& error) {
+    if (depthProgram_ != 0) return true;
+    depthProgram_ = compileShaderProgram(MOB_DEPTH_VERTEX_SHADER,
+                                         MOB_DEPTH_FRAGMENT_SHADER, error);
+    if (depthProgram_ == 0) return false;
+    depthLightViewProjLoc_ = glGetUniformLocation(depthProgram_, "uLightViewProj");
+    return true;
+}
+
 void MobRenderer::draw(const MobInstanceData* instances, size_t count,
                        const glm::mat4& viewProj) {
+    draw(instances, count, viewProj, SceneLighting{});
+}
+
+void MobRenderer::draw(const MobInstanceData* instances, size_t count,
+                       const glm::mat4& viewProj,
+                       const SceneLighting& lighting) {
     if (instances == nullptr || count == 0 || program_ == 0) return;
 
     const size_t bytes = count * sizeof(MobInstanceData);
@@ -363,9 +481,51 @@ void MobRenderer::draw(const MobInstanceData* instances, size_t count,
 
     glUseProgram(program_);
     glUniformMatrix4fv(viewProjLoc_, 1, GL_FALSE, glm::value_ptr(viewProj));
+    glUniform1i(dynamicLightingLoc_, lighting.dynamic ? 1 : 0);
+    if (lighting.dynamic) {
+        glUniform3fv(lightDirectionLoc_, 1, glm::value_ptr(lighting.direction));
+        glUniform3fv(diffuseColorLoc_, 1, glm::value_ptr(lighting.diffuseColor));
+        glUniform3fv(ambientColorLoc_, 1, glm::value_ptr(lighting.ambientColor));
+        glUniform3fv(fogColorLoc_, 1, glm::value_ptr(lighting.fogColor));
+        glUniform3fv(cameraPositionLoc_, 1, glm::value_ptr(lighting.cameraPosition));
+        glUniform1f(fogDensityLoc_, lighting.fogDensity);
+        glUniformMatrix4fv(lightViewProjLoc_, 1, GL_FALSE,
+                           glm::value_ptr(lighting.lightViewProj));
+        glUniform1i(shadowsLoc_, lighting.shadows ? 1 : 0);
+        glUniform1f(shadowStrengthLoc_, lighting.shadowStrength);
+        glUniform3fv(shadowCenterLoc_, 1, glm::value_ptr(lighting.shadowCenter));
+        glUniform1f(shadowRadiusLoc_, lighting.shadowRadius);
+        if (lighting.shadows) {
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, lighting.shadowTexture);
+            glUniform1i(shadowMapLoc_, 2);
+        }
+    }
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, texture_);
     glUniform1i(textureLoc_, 1);
+    glBindVertexArray(vao_);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, vertexCount_,
+                          static_cast<GLsizei>(count));
+    glBindVertexArray(0);
+}
+
+void MobRenderer::drawDepth(const MobInstanceData* instances, size_t count,
+                            const glm::mat4& lightViewProj) {
+    if (instances == nullptr || count == 0 || depthProgram_ == 0) return;
+
+    const size_t bytes = count * sizeof(MobInstanceData);
+    glBindBuffer(GL_ARRAY_BUFFER, instanceVbo_);
+    if (bytes > instanceCapacity_) {
+        instanceCapacity_ = bytes + bytes / 4;
+        glBufferData(GL_ARRAY_BUFFER, instanceCapacity_, nullptr, GL_STREAM_DRAW);
+    }
+    glBufferData(GL_ARRAY_BUFFER, instanceCapacity_, nullptr, GL_STREAM_DRAW);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, bytes, instances);
+
+    glUseProgram(depthProgram_);
+    glUniformMatrix4fv(depthLightViewProjLoc_, 1, GL_FALSE,
+                       glm::value_ptr(lightViewProj));
     glBindVertexArray(vao_);
     glDrawArraysInstanced(GL_TRIANGLES, 0, vertexCount_,
                           static_cast<GLsizei>(count));
@@ -378,8 +538,14 @@ void MobRenderer::destroy() {
     if (vertexVbo_ != 0) glDeleteBuffers(1, &vertexVbo_);
     if (vao_ != 0) glDeleteVertexArrays(1, &vao_);
     if (program_ != 0) glDeleteProgram(program_);
-    texture_ = instanceVbo_ = vertexVbo_ = vao_ = program_ = 0;
+    if (depthProgram_ != 0) glDeleteProgram(depthProgram_);
+    texture_ = instanceVbo_ = vertexVbo_ = vao_ = program_ = depthProgram_ = 0;
     viewProjLoc_ = textureLoc_ = -1;
+    dynamicLightingLoc_ = lightDirectionLoc_ = diffuseColorLoc_ = -1;
+    ambientColorLoc_ = fogColorLoc_ = cameraPositionLoc_ = fogDensityLoc_ = -1;
+    lightViewProjLoc_ = shadowsLoc_ = shadowMapLoc_ = shadowStrengthLoc_ = -1;
+    shadowCenterLoc_ = shadowRadiusLoc_ = -1;
+    depthLightViewProjLoc_ = -1;
     vertexCount_ = 0;
     instanceCapacity_ = 0;
 }
