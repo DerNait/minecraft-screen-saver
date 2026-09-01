@@ -36,6 +36,8 @@ struct AppConfig {
     std::string assetsDir;        // carpeta de texturas; vacia = busqueda automatica
     bool        vsync    = true;  // sincronizacion vertical (desactivar para medir)
     int         threads  = 0;     // hilos de OpenMP; 0 = los que decida el sistema
+    std::string cameraMode = "orbit"; // orbit = camara original, auto = encuadres automaticos
+    float       cameraChangeSeconds = 10.0f; // intervalo entre encuadres automaticos
     bool        showHelp = false; // el usuario pidio la ayuda
 };
 

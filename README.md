@@ -36,6 +36,27 @@ operaciones `atomic` ni bloqueos. La pequeña repetición de cálculos en los
 bordes es el costo del halo y no cambia el resultado generado para una misma
 semilla.
 
+## Cámara de la versión paralela
+
+La cámara orbital original continúa siendo el comportamiento predeterminado.
+La versión paralela también puede alternar automáticamente entre cinco
+encuadres: órbita exterior, panorámica interior, órbita interior, diagonal
+elevada y vista cenital. Las cámaras interiores móviles mantienen una altura
+fija durante cada mundo, independiente del relieve que atraviesan. Los cambios
+de encuadre usan una transición suave con elevación para no atravesar el
+terreno. El mirador interior estático se conserva en el código, pero está fuera
+de la secuencia automática para poder reactivarlo más adelante.
+
+```bash
+./build/paralelo.exe 500000 --camera auto
+./build/paralelo.exe 500000 --camera auto --camera-change 8
+./build/paralelo.exe 500000 --camera orbit
+```
+
+`--camera-change` acepta intervalos de 2 a 120 segundos y solo afecta al modo
+`auto`. Estas opciones se consideran experimentales de la versión paralela; no
+modifican el comportamiento visual de la versión secuencial.
+
 ## Avance 1 — ubicación en el código
 
 - **Variable en memoria que almacena los elementos a renderizar**:

@@ -68,6 +68,8 @@ void printUsage(const char* programName) {
         "  --assets <ruta>       Carpeta con las texturas .png.\n"
         "  --no-vsync            Desactiva la sincronizacion vertical (para medir).\n"
         "  --threads <n>         Hilos de OpenMP.            (1 - 256, solo paralelo)\n"
+        "  --camera <modo>       orbit | auto.               (solo paralelo, def. orbit)\n"
+        "  --camera-change <s>   Segundos entre encuadres.   (2 - 120, def. 10)\n"
         "  --help                Muestra esta ayuda.\n"
         "\n"
         "Ejemplos:\n"
@@ -208,6 +210,21 @@ bool parseArguments(int argc, char** argv, AppConfig& config, std::string& error
                 return false;
             }
             config.threads = static_cast<int>(v);
+
+        } else if (std::strcmp(opt, "--camera") == 0) {
+            if (std::strcmp(value, "orbit") != 0 && std::strcmp(value, "auto") != 0) {
+                error = outOfRange("--camera", value, "'orbit' o 'auto'");
+                return false;
+            }
+            config.cameraMode = value;
+
+        } else if (std::strcmp(opt, "--camera-change") == 0) {
+            float v = 0.0f;
+            if (!parseFloat(value, v) || v < 2.0f || v > 120.0f) {
+                error = outOfRange("--camera-change", value, "un numero entre 2 y 120");
+                return false;
+            }
+            config.cameraChangeSeconds = v;
 
         } else if (std::strcmp(opt, "--assets") == 0) {
             config.assetsDir = value;

@@ -20,8 +20,8 @@
 //  Elemento de fisica/trigonometria requerido por el enunciado:
 //    - Cada bloque cae con aceleracion constante (integracion de Euler de la
 //      gravedad) hasta asentarse en su posicion final.
-//    - La camara orbita el mundo describiendo una circunferencia mediante
-//      funciones trigonometricas (seno y coseno).
+//    - La camara puede orbitar el mundo o alternar entre encuadres exteriores e
+//      interiores; los recorridos usan funciones trigonometricas (seno y coseno).
 // ============================================================================
 
 #include <GL/glew.h>
@@ -30,6 +30,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <omp.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -122,6 +123,188 @@ struct World {
 
 // Fases del ciclo del protector de pantalla.
 enum class Phase { Building, Holding, Dissolving, Paused };
+
+// ============================================================================
+//  CAMARA
+// ============================================================================
+
+// Un encuadre completo. Ademas de la posicion y el punto observado se conserva
+// el vector vertical porque la toma cenital necesita una orientacion distinta.
+struct CameraView {
+    glm::vec3   eye;
+    glm::vec3   target;
+    glm::vec3   up;
+    float       fovDegrees;
+    int         shot;
+    const char* name;
+};
+
+static const int kCameraShotCount = 6;
+static const char* const kCameraShotNames[kCameraShotCount] = {
+    "orbita exterior",
+    "mirador interior",
+    "panoramica interior",
+    "orbita interior",
+    "diagonal elevada",
+    "vista cenital"
+};
+
+// Secuencia activa del modo automatico. El mirador interior fijo (toma 1) se
+// conserva implementado en makeCameraShot(), pero queda fuera de la rotacion
+// para poder reactivarlo en el futuro agregando nuevamente el 1 a esta lista.
+static const int kAutoCameraShots[] = { 0, 2, 3, 4, 5 };
+static const int kAutoCameraShotCount =
+    static_cast<int>(sizeof(kAutoCameraShots) / sizeof(kAutoCameraShots[0]));
+
+// Devuelve la altura de la superficie bajo una posicion expresada en las
+// coordenadas centradas que usa el renderizador. Se interpola entre las cuatro
+// columnas vecinas: elegir una sola columna con redondeo produciria un salto
+// vertical cada vez que una camara movil cruza el limite entre dos bloques.
+static float terrainTopAt(const World& world, float worldX, float worldZ) {
+    if (world.heightMap.empty() || world.side <= 0) return 1.0f;
+
+    const float offset = world.side * 0.5f - 0.5f;
+    float gridX = std::max(0.0f, std::min(static_cast<float>(world.side - 1),
+                                         worldX + offset));
+    float gridZ = std::max(0.0f, std::min(static_cast<float>(world.side - 1),
+                                         worldZ + offset));
+
+    const int x0 = static_cast<int>(std::floor(gridX));
+    const int z0 = static_cast<int>(std::floor(gridZ));
+    const int x1 = std::min(x0 + 1, world.side - 1);
+    const int z1 = std::min(z0 + 1, world.side - 1);
+    const float tx = gridX - static_cast<float>(x0);
+    const float tz = gridZ - static_cast<float>(z0);
+
+    const auto heightAt = [&world](int x, int z) {
+        return static_cast<float>(
+            world.heightMap[static_cast<size_t>(z) * world.side + x]);
+    };
+
+    const float nearHeight = heightAt(x0, z0) * (1.0f - tx) + heightAt(x1, z0) * tx;
+    const float farHeight  = heightAt(x0, z1) * (1.0f - tx) + heightAt(x1, z1) * tx;
+    return nearHeight * (1.0f - tz) + farHeight * tz + 0.5f;
+}
+
+// Construye uno de los encuadres de la secuencia automatica. Todos escalan con
+// las dimensiones del mundo, de modo que funcionan igual para distintos N.
+static CameraView makeCameraShot(const World& world, int shot, double now) {
+    const float side = static_cast<float>(world.side);
+    const float time = static_cast<float>(now);
+    const float centerSurface = terrainTopAt(world, 0.0f, 0.0f);
+    const glm::vec3 center(0.0f, centerSurface + 2.0f, 0.0f);
+    // Las tomas interiores moviles mantienen esta altura durante todo el mundo.
+    // No siguen el relieve local, por lo que su movimiento vertical es nulo.
+    const float interiorEyeY = static_cast<float>(world.height) - 2.0f;
+
+    CameraView view{};
+    view.shot = shot;
+    view.name = kCameraShotNames[shot];
+    view.up = glm::vec3(0.0f, 1.0f, 0.0f);
+
+    switch (shot) {
+        case 0: { // Orbita exterior original.
+            const float radius = side * 1.05f + 14.0f;
+            const float height = world.height * 0.85f + side * 0.30f;
+            const float angle = time * 0.15f;
+            view.eye = glm::vec3(std::cos(angle) * radius,
+                                 height,
+                                 std::sin(angle) * radius);
+            view.target = glm::vec3(0.0f, world.height * 0.30f, 0.0f);
+            view.fovDegrees = 55.0f;
+            break;
+        }
+
+        case 1: { // Mirador fijo desactivado de la secuencia automatica.
+            const float x = -side * 0.22f;
+            const float z = -side * 0.18f;
+            const float tx = side * 0.18f;
+            const float tz = side * 0.16f;
+            view.eye = glm::vec3(x, terrainTopAt(world, x, z) + 8.5f, z);
+            view.target = glm::vec3(tx, terrainTopAt(world, tx, tz) + 2.0f, tz);
+            view.fovDegrees = 62.0f;
+            break;
+        }
+
+        case 2: { // Posicion interior fija que gira lentamente.
+            const float x = side * 0.08f;
+            const float z = -side * 0.10f;
+            const float angle = time * 0.18f;
+            const float lookDistance = side * 0.34f;
+            const float tx = x + std::cos(angle) * lookDistance;
+            const float tz = z + std::sin(angle) * lookDistance;
+            view.eye = glm::vec3(x, interiorEyeY, z);
+            view.target = glm::vec3(tx, center.y, tz);
+            view.fovDegrees = 66.0f;
+            break;
+        }
+
+        case 3: { // Orbita baja que recorre el interior del mundo.
+            const float angle = time * 0.11f;
+            const float radius = side * 0.31f;
+            const float x = std::cos(angle) * radius;
+            const float z = std::sin(angle) * radius;
+            view.eye = glm::vec3(x, interiorEyeY + 1.0f, z);
+            view.target = center;
+            view.fovDegrees = 60.0f;
+            break;
+        }
+
+        case 4: { // Vista exterior elevada desde una esquina.
+            const float drift = std::sin(time * 0.08f) * side * 0.08f;
+            view.eye = glm::vec3(side * 0.62f + drift,
+                                 world.height * 0.95f + side * 0.38f,
+                                -side * 0.62f + drift);
+            view.target = center;
+            view.fovDegrees = 52.0f;
+            break;
+        }
+
+        default: { // Vista cenital con un desplazamiento circular pequeno.
+            const float angle = time * 0.07f;
+            const float radius = side * 0.12f;
+            view.eye = glm::vec3(std::cos(angle) * radius,
+                                 world.height + side * 0.90f + 12.0f,
+                                 std::sin(angle) * radius);
+            view.target = center;
+            view.up = glm::vec3(0.0f, 0.0f, -1.0f);
+            view.fovDegrees = 50.0f;
+            break;
+        }
+    }
+
+    return view;
+}
+
+// Selecciona la toma activa y suaviza el cambio desde la anterior. Durante la
+// interpolacion se agrega un arco vertical que evita atravesar el terreno.
+static CameraView calculateCamera(const World& world, const AppConfig& cfg, double now) {
+    if (cfg.cameraMode != "auto") return makeCameraShot(world, 0, now);
+
+    const double interval = static_cast<double>(cfg.cameraChangeSeconds);
+    const long long slot = static_cast<long long>(std::floor(now / interval));
+    const int playlistIndex = static_cast<int>(slot % kAutoCameraShotCount);
+    const int shot = kAutoCameraShots[playlistIndex];
+    CameraView current = makeCameraShot(world, shot, now);
+
+    const double inSlot = now - static_cast<double>(slot) * interval;
+    const float transitionSeconds = std::min(1.5f, cfg.cameraChangeSeconds * 0.25f);
+    if (slot <= 0 || inSlot >= transitionSeconds) return current;
+
+    const int previousPlaylistIndex =
+        static_cast<int>((slot - 1) % kAutoCameraShotCount);
+    const int previousShot = kAutoCameraShots[previousPlaylistIndex];
+    const CameraView previous = makeCameraShot(world, previousShot, now);
+    float t = static_cast<float>(inSlot / transitionSeconds);
+    t = t * t * (3.0f - 2.0f * t); // smoothstep
+
+    current.eye = previous.eye * (1.0f - t) + current.eye * t;
+    current.eye.y += std::sin(t * 3.14159265f) * std::max(4.0f, world.side * 0.06f);
+    current.target = previous.target * (1.0f - t) + current.target * t;
+    current.up = glm::normalize(previous.up * (1.0f - t) + current.up * t);
+    current.fovDegrees = previous.fovDegrees * (1.0f - t) + current.fovDegrees * t;
+    return current;
+}
 
 // ============================================================================
 //  GENERACION DEL TERRENO
@@ -828,6 +1011,12 @@ int main(int argc, char** argv) {
                 atlas.pixelBytes() / 1024.0, atlasMs);
     std::printf("OpenMP     : %d hilos | chunks %dx%d | halo %d\n",
                 openmpThreads, chunkColumns, chunkRows, kVegetationHalo);
+    if (cfg.cameraMode == "auto") {
+        std::printf("Camara     : automatica | cambio cada %.1f s | %d encuadres\n",
+                    cfg.cameraChangeSeconds, kAutoCameraShotCount);
+    } else {
+        std::printf("Camara     : orbita exterior\n");
+    }
 
     // --- 5. Generacion del primer mundo --------------------------------------
     // Semilla: la indicada por el usuario, o una sorteada por el sistema.
@@ -922,28 +1111,21 @@ int main(int argc, char** argv) {
         cpuMsAccum += std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - cpuStart).count();
 
-        // --- Camara: orbita circular alrededor del centro del mundo ----------
-        // La posicion se obtiene con funciones trigonometricas sobre el angulo
-        // que avanza con el tiempo.
+        // --- Camara ----------------------------------------------------------
+        // El modo orbit conserva la toma original. El modo auto alterna entre
+        // encuadres exteriores e interiores con una transicion elevada.
         int fbWidth = 0, fbHeight = 0;
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbHeight == 0) fbHeight = 1;
         glViewport(0, 0, fbWidth, fbHeight);
 
-        float orbitRadius = world.side * 1.05f + 14.0f;
-        float orbitHeight = world.height * 0.85f + world.side * 0.30f;
-        float angle       = static_cast<float>(now) * 0.15f;
-
-        glm::vec3 eye(std::cos(angle) * orbitRadius,
-                      orbitHeight,
-                      std::sin(angle) * orbitRadius);
-        glm::vec3 center(0.0f, world.height * 0.30f, 0.0f);
+        CameraView camera = calculateCamera(world, cfg, now);
 
         glm::mat4 projection = glm::perspective(
-            glm::radians(55.0f),
+            glm::radians(camera.fovDegrees),
             static_cast<float>(fbWidth) / static_cast<float>(fbHeight),
-            0.5f, orbitRadius * 4.0f + 200.0f);
-        glm::mat4 view     = glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
+            0.5f, world.side * 6.0f + 200.0f);
+        glm::mat4 view     = glm::lookAt(camera.eye, camera.target, camera.up);
         glm::mat4 viewProj = projection * view;
 
         // --- Dibujo -----------------------------------------------------------
@@ -967,9 +1149,10 @@ int main(int argc, char** argv) {
 
             char title[256];
             std::snprintf(title, sizeof(title),
-                          "Minecraft Screen Saver - Paralelo | %d hilos | FPS %d | %s | "
+                          "Minecraft Screen Saver - Paralelo | %d hilos | FPS %d | %s | cam %s | "
                           "bloques %zu / dibujados %zu | CPU %.2f ms | %s",
                           openmpThreads, displayedFps, world.biome->name,
+                          camera.name,
                           world.blocks.size(), drawnBlocks,
                           cpuMsAccum / frameCount, phaseName);
             glfwSetWindowTitle(window, title);
