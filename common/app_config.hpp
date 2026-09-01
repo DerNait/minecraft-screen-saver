@@ -38,6 +38,7 @@ struct AppConfig {
     int         threads  = 0;     // hilos de OpenMP; 0 = los que decida el sistema
     std::string cameraMode = "orbit"; // orbit = camara original, auto = encuadres automaticos
     float       cameraChangeSeconds = 10.0f; // intervalo entre encuadres automaticos
+    int         mobCount = 0;      // mobs activos; 0 conserva el benchmark de terreno
     bool        showHelp = false; // el usuario pidio la ayuda
 };
 

@@ -57,6 +57,40 @@ de la secuencia automática para poder reactivarlo más adelante.
 `auto`. Estas opciones se consideran experimentales de la versión paralela; no
 modifican el comportamiento visual de la versión secuencial.
 
+## Mobs e IA básica
+
+La primera tanda de mobs agrega cerdos, vacas y ovejas con las texturas
+originales de `assets/textures/entity/`. Se renderizan como modelos cuadrúpedos
+instanciados, separados del buffer de bloques del terreno. Los zombies se
+conservan como referencia interna, pero no forman parte de la población activa.
+
+Los animales aparecen cuando termina la construcción del mundo. Cada uno puede
+esperar o caminar, elige su dirección mediante una secuencia pseudoaleatoria
+reproducible y evita bordes, desniveles mayores a un bloque, árboles y cactus.
+Se ocultan al comenzar el desarmado y se generan nuevamente con el siguiente
+mundo.
+
+Cada animal tiene cabeza, cuerpo y cuatro patas independientes. Como en los
+modelos de Minecraft, las cuatro patas pueden reutilizar la misma región de la
+textura; las patas que corresponden al lado opuesto se reflejan geométricamente
+en vez de depender de otra zona del PNG. La oveja se dibuja en dos capas: cuerpo
+base y lana ligeramente expandida.
+
+Las proporciones y coordenadas UV toman como referencia los modelos oficiales
+de Mojang para [cerdo](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/models/entity/pig.v3.geo.json),
+[vaca](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/models/entity/cow.v2.geo.json)
+y [oveja](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/models/entity/sheep.geo.json).
+
+```bash
+./build/paralelo.exe 500000 --mobs 20 --hold 20
+./build/paralelo.exe 500000 --threads 12 --camera auto --mobs 100 --hold 30
+```
+
+`--mobs` acepta de 0 a 5000 entidades. Su valor predeterminado es 0 para que las
+mediciones existentes del terreno no cambien. En esta primera tanda la IA se
+actualiza secuencialmente; el siguiente paso será separar percepción, propuesta
+y resolución para comparar su actualización secuencial y paralela.
+
 ## Avance 1 — ubicación en el código
 
 - **Variable en memoria que almacena los elementos a renderizar**:

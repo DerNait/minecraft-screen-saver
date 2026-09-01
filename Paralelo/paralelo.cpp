@@ -17,6 +17,9 @@
 //    3. updateWorld()           - fisica con reduccion de bloques vivos
 //    4. buildInstanceBuffer()   - compactacion determinista por prefijos
 //
+//  Los mobs opcionales comienzan con una IA secuencial para establecer el
+//  comportamiento de referencia antes de paralelizarla en la siguiente tanda.
+//
 //  Elemento de fisica/trigonometria requerido por el enunciado:
 //    - Cada bloque cae con aceleracion constante (integracion de Euler de la
 //      gravedad) hasta asentarse en su posicion final.
@@ -41,6 +44,7 @@
 
 #include "app_config.hpp"
 #include "block_catalog.hpp"
+#include "mob_renderer.hpp"
 #include "noise.hpp"
 #include "render.hpp"
 #include "texture_atlas.hpp"
@@ -304,6 +308,188 @@ static CameraView calculateCamera(const World& world, const AppConfig& cfg, doub
     current.up = glm::normalize(previous.up * (1.0f - t) + current.up * t);
     current.fovDegrees = previous.fovDegrees * (1.0f - t) + current.fovDegrees * t;
     return current;
+}
+
+// ============================================================================
+//  MOBS - PRIMERA TANDA: IA SECUENCIAL
+// ============================================================================
+
+enum class MobAction : uint8_t { Waiting, Walking };
+enum class MobKind : uint8_t { Pig, Cow, Sheep };
+
+struct Mob {
+    float x, y, z;          // x,z en coordenadas de la reticula; y en el render
+    float yaw;              // direccion actual
+    float speed;            // bloques por segundo
+    float actionRemaining;  // tiempo antes de elegir otra accion
+    float hopPhase;         // fase visual del paso/salto
+    uint32_t randomState;   // RNG propio para decisiones reproducibles
+    MobAction action;
+    MobKind kind;
+};
+
+static uint32_t nextMobRandom(Mob& mob) {
+    mob.randomState = hashUint(mob.randomState + 0x9E3779B9u);
+    return mob.randomState;
+}
+
+static float mobRandom01(Mob& mob) {
+    return hashToUnitFloat(nextMobRandom(mob));
+}
+
+// Altura continua para que el mob suba desniveles de un bloque sin saltos
+// visuales. Las decisiones de colision siguen usando celdas enteras.
+static float mobSurfaceAt(const World& world, float gridX, float gridZ) {
+    gridX = std::max(0.0f, std::min(static_cast<float>(world.side - 1), gridX));
+    gridZ = std::max(0.0f, std::min(static_cast<float>(world.side - 1), gridZ));
+    const int x0 = static_cast<int>(std::floor(gridX));
+    const int z0 = static_cast<int>(std::floor(gridZ));
+    const int x1 = std::min(x0 + 1, world.side - 1);
+    const int z1 = std::min(z0 + 1, world.side - 1);
+    const float tx = gridX - x0;
+    const float tz = gridZ - z0;
+    const auto h = [&world](int x, int z) {
+        return static_cast<float>(
+            world.heightMap[static_cast<size_t>(z) * world.side + x]);
+    };
+    const float h0 = h(x0, z0) * (1.0f - tx) + h(x1, z0) * tx;
+    const float h1 = h(x0, z1) * (1.0f - tx) + h(x1, z1) * tx;
+    return h0 * (1.0f - tz) + h1 * tz;
+}
+
+static bool mobCellIsClear(const World& world, int gx, int gz) {
+    if (gx < 2 || gx >= world.side - 2 || gz < 2 || gz >= world.side - 2) {
+        return false;
+    }
+    const int surface = world.heightMap[static_cast<size_t>(gz) * world.side + gx];
+    if (surface + 2 >= world.height) return false;
+    return !world.occupiedAt(gx, surface + 1, gz) &&
+           !world.occupiedAt(gx, surface + 2, gz);
+}
+
+// Se ejecuta cuando inicia Holding, momento en que occupancy ya representa el
+// terreno armado. Esto permite evitar arboles y cactus al elegir posiciones.
+static std::vector<Mob> spawnMobs(const World& world, int requested) {
+    std::vector<Mob> mobs;
+    if (requested <= 0 || world.side < 6) return mobs;
+
+    mobs.reserve(static_cast<size_t>(requested));
+    std::vector<uint8_t> taken(static_cast<size_t>(world.side) * world.side, 0);
+    uint32_t randomState = hashUint(world.seed ^ 0x4D4F4253u); // "MOBS"
+    const int usableSide = world.side - 4;
+
+    for (int i = 0; i < requested; ++i) {
+        bool placed = false;
+        for (int attempt = 0; attempt < 64 && !placed; ++attempt) {
+            randomState = hashUint(randomState + 0x9E3779B9u);
+            const int gx = 2 + static_cast<int>(randomState %
+                                                static_cast<uint32_t>(usableSide));
+            randomState = hashUint(randomState + 0x9E3779B9u);
+            const int gz = 2 + static_cast<int>(randomState %
+                                                static_cast<uint32_t>(usableSide));
+            const size_t cell = static_cast<size_t>(gz) * world.side + gx;
+            if (taken[cell] || !mobCellIsClear(world, gx, gz)) continue;
+
+            taken[cell] = 1;
+            Mob mob{};
+            mob.x = static_cast<float>(gx);
+            mob.z = static_cast<float>(gz);
+            mob.y = static_cast<float>(
+                world.heightMap[static_cast<size_t>(gz) * world.side + gx]) + 0.5f;
+            mob.randomState = hashUint(randomState ^ static_cast<uint32_t>(i));
+            mob.yaw = mobRandom01(mob) * 6.28318530f;
+            mob.speed = 0.8f + mobRandom01(mob) * 0.6f;
+            mob.actionRemaining = 0.25f + mobRandom01(mob) * 1.0f;
+            mob.action = MobAction::Waiting;
+            mob.kind = static_cast<MobKind>(i % 3);
+            mobs.push_back(mob);
+            placed = true;
+        }
+        if (!placed) break; // el mundo ya no tiene mas columnas libres
+    }
+    return mobs;
+}
+
+static void chooseNextMobAction(Mob& mob) {
+    if (mobRandom01(mob) < 0.28f) {
+        mob.action = MobAction::Waiting;
+        mob.actionRemaining = 0.5f + mobRandom01(mob) * 1.5f;
+        return;
+    }
+
+    mob.action = MobAction::Walking;
+    mob.yaw = mobRandom01(mob) * 6.28318530f;
+    mob.speed = 0.8f + mobRandom01(mob) * 0.7f;
+    mob.actionRemaining = 1.2f + mobRandom01(mob) * 2.8f;
+}
+
+// Primera implementacion deliberadamente secuencial. En la siguiente tanda se
+// separara en percepcion/propuesta/resolucion para actualizar mobs en paralelo.
+static void updateMobsSequential(std::vector<Mob>& mobs, const World& world, float dt) {
+    for (Mob& mob : mobs) {
+        mob.actionRemaining -= dt;
+        if (mob.actionRemaining <= 0.0f) chooseNextMobAction(mob);
+
+        if (mob.action == MobAction::Walking) {
+            const float nextX = mob.x + std::cos(mob.yaw) * mob.speed * dt;
+            const float nextZ = mob.z + std::sin(mob.yaw) * mob.speed * dt;
+            const int gx = static_cast<int>(std::lround(nextX));
+            const int gz = static_cast<int>(std::lround(nextZ));
+            bool clear = mobCellIsClear(world, gx, gz);
+
+            if (clear) {
+                const int oldX = static_cast<int>(std::lround(mob.x));
+                const int oldZ = static_cast<int>(std::lround(mob.z));
+                const int oldSurface = world.heightMap[
+                    static_cast<size_t>(oldZ) * world.side + oldX];
+                const int newSurface = world.heightMap[
+                    static_cast<size_t>(gz) * world.side + gx];
+                clear = std::abs(newSurface - oldSurface) <= 1;
+            }
+
+            if (clear) {
+                mob.x = nextX;
+                mob.z = nextZ;
+                mob.hopPhase += dt * (7.0f + mob.speed * 2.0f);
+            } else {
+                // Giro determinista al encontrar un borde, arbol o desnivel.
+                const float side = mobRandom01(mob) < 0.5f ? -1.0f : 1.0f;
+                mob.yaw += side * (1.2f + mobRandom01(mob) * 1.2f);
+                mob.actionRemaining = 0.35f + mobRandom01(mob) * 0.45f;
+            }
+        }
+
+        const float targetY = mobSurfaceAt(world, mob.x, mob.z) + 0.5f;
+        mob.y += (targetY - mob.y) * std::min(1.0f, dt * 8.0f);
+    }
+}
+
+static void buildMobInstances(const std::vector<Mob>& mobs, const World& world,
+                              std::vector<MobInstanceData>& pigs,
+                              std::vector<MobInstanceData>& cows,
+                              std::vector<MobInstanceData>& sheep) {
+    const float offset = world.side * 0.5f - 0.5f;
+    pigs.clear();
+    cows.clear();
+    sheep.clear();
+    pigs.reserve((mobs.size() + 2) / 3);
+    cows.reserve((mobs.size() + 2) / 3);
+    sheep.reserve((mobs.size() + 2) / 3);
+
+    for (const Mob& mob : mobs) {
+        const float bob = mob.action == MobAction::Walking
+                        ? std::max(0.0f, std::sin(mob.hopPhase)) * 0.10f
+                        : 0.0f;
+        // Los modelos cuadrupedos miran hacia -Z en su espacio local. Este
+        // desfase alinea su cabeza con la direccion en que avanza la IA.
+        const MobInstanceData instance{
+            mob.x - offset, mob.y, mob.z - offset,
+            mob.yaw - 1.57079633f, bob
+        };
+        if (mob.kind == MobKind::Pig) pigs.push_back(instance);
+        else if (mob.kind == MobKind::Cow) cows.push_back(instance);
+        else sheep.push_back(instance);
+    }
 }
 
 // ============================================================================
@@ -1006,6 +1192,31 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    MobRenderer pigRenderer;
+    MobRenderer cowRenderer;
+    MobRenderer sheepRenderer;
+    MobRenderer sheepWoolRenderer;
+    if (cfg.mobCount > 0 &&
+        (!pigRenderer.init(MobModel::Pig,
+                           assetsDir + "/entity/pig/temperate_pig.png", error) ||
+         !cowRenderer.init(MobModel::Cow,
+                           assetsDir + "/entity/cow/temperate_cow.png", error) ||
+         !sheepRenderer.init(MobModel::Sheep,
+                             assetsDir + "/entity/sheep/sheep.png", error) ||
+         !sheepWoolRenderer.init(MobModel::SheepWool,
+                                 assetsDir + "/entity/sheep/sheep_wool.png", error))) {
+        std::fprintf(stderr, "Error al preparar los mobs: %s\n", error.c_str());
+        sheepWoolRenderer.destroy();
+        sheepRenderer.destroy();
+        cowRenderer.destroy();
+        pigRenderer.destroy();
+        renderer.destroy();
+        atlas.destroy();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
+
     std::printf("Texturas   : %s (%d capas, %.1f KB, %.1f ms)\n",
                 assetsDir.c_str(), atlas.layerCount(),
                 atlas.pixelBytes() / 1024.0, atlasMs);
@@ -1017,6 +1228,8 @@ int main(int argc, char** argv) {
     } else {
         std::printf("Camara     : orbita exterior\n");
     }
+    std::printf("Mobs       : %d solicitados | cerdos, vacas y ovejas | IA secuencial%s\n",
+                cfg.mobCount, cfg.mobCount == 0 ? " (desactivados)" : "");
 
     // --- 5. Generacion del primer mundo --------------------------------------
     // Semilla: la indicada por el usuario, o una sorteada por el sistema.
@@ -1027,6 +1240,10 @@ int main(int argc, char** argv) {
     double genMs = generateWorld(cfg, seed, world);
 
     std::vector<InstanceData> instances(world.blocks.size());
+    std::vector<Mob> mobs;
+    std::vector<MobInstanceData> pigInstances;
+    std::vector<MobInstanceData> cowInstances;
+    std::vector<MobInstanceData> sheepInstances;
 
     std::printf("Mundo      : semilla %u | bioma %s | reticula %dx%dx%d\n"
                 "             bloques %zu (N pedido %ld) | generado en %.1f ms\n",
@@ -1047,6 +1264,7 @@ int main(int argc, char** argv) {
     bool   spaceWasDown = false;  // estado previo de ESPACIO (deteccion de flanco)
     size_t drawnBlocks  = 0;
     double cpuMsAccum   = 0.0;   // tiempo de CPU acumulado del fotograma
+    bool   mobsSpawned  = false; // aparecen cuando el terreno queda armado
 
     while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
@@ -1088,6 +1306,11 @@ int main(int argc, char** argv) {
             seed = (cfg.seed != 0) ? cfg.seed : randomDevice();
             genMs = generateWorld(cfg, seed, world);
             instances.assign(world.blocks.size(), InstanceData{});
+            mobs.clear();
+            pigInstances.clear();
+            cowInstances.clear();
+            sheepInstances.clear();
+            mobsSpawned = false;
             liveBlocks = world.blocks.size();
             phase      = Phase::Building;
             cycleStart = glfwGetTime();
@@ -1105,6 +1328,23 @@ int main(int argc, char** argv) {
         auto cpuStart = std::chrono::steady_clock::now();
 
         updateWorld(world, elapsed, dt, liveBlocks);
+
+        if (phase == Phase::Holding && cfg.mobCount > 0) {
+            if (!mobsSpawned) {
+                mobs = spawnMobs(world, cfg.mobCount);
+                mobsSpawned = true;
+                std::printf("Mobs activos: %zu de %d solicitados\n",
+                            mobs.size(), cfg.mobCount);
+                std::fflush(stdout);
+            }
+            updateMobsSequential(mobs, world, dt);
+            buildMobInstances(mobs, world, pigInstances, cowInstances, sheepInstances);
+        } else {
+            pigInstances.clear();
+            cowInstances.clear();
+            sheepInstances.clear();
+        }
+
         drawnBlocks = buildInstanceBuffer(world, faceTexTables[world.biomeIndex].data(),
                                           instances.data());
 
@@ -1136,6 +1376,10 @@ int main(int argc, char** argv) {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         renderer.draw(instances.data(), drawnBlocks, viewProj, atlas.textureId());
+        pigRenderer.draw(pigInstances.data(), pigInstances.size(), viewProj);
+        cowRenderer.draw(cowInstances.data(), cowInstances.size(), viewProj);
+        sheepRenderer.draw(sheepInstances.data(), sheepInstances.size(), viewProj);
+        sheepWoolRenderer.draw(sheepInstances.data(), sheepInstances.size(), viewProj);
         glfwSwapBuffers(window);
 
         // --- Indicador de FPS en el titulo de la ventana ----------------------
@@ -1150,10 +1394,11 @@ int main(int argc, char** argv) {
             char title[256];
             std::snprintf(title, sizeof(title),
                           "Minecraft Screen Saver - Paralelo | %d hilos | FPS %d | %s | cam %s | "
-                          "bloques %zu / dibujados %zu | CPU %.2f ms | %s",
+                          "bloques %zu / dibujados %zu | mobs %zu | CPU %.2f ms | %s",
                           openmpThreads, displayedFps, world.biome->name,
                           camera.name,
                           world.blocks.size(), drawnBlocks,
+                          pigInstances.size() + cowInstances.size() + sheepInstances.size(),
                           cpuMsAccum / frameCount, phaseName);
             glfwSetWindowTitle(window, title);
 
@@ -1164,6 +1409,10 @@ int main(int argc, char** argv) {
     }
 
     // --- 7. Liberacion ordenada de recursos ----------------------------------
+    sheepWoolRenderer.destroy();
+    sheepRenderer.destroy();
+    cowRenderer.destroy();
+    pigRenderer.destroy();
     renderer.destroy();
     atlas.destroy();
     glfwDestroyWindow(window);

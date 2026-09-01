@@ -70,6 +70,7 @@ void printUsage(const char* programName) {
         "  --threads <n>         Hilos de OpenMP.            (1 - 256, solo paralelo)\n"
         "  --camera <modo>       orbit | auto.               (solo paralelo, def. orbit)\n"
         "  --camera-change <s>   Segundos entre encuadres.   (2 - 120, def. 10)\n"
+        "  --mobs <n>            Cantidad de animales.      (0 - 5000, def. 0)\n"
         "  --help                Muestra esta ayuda.\n"
         "\n"
         "Ejemplos:\n"
@@ -225,6 +226,14 @@ bool parseArguments(int argc, char** argv, AppConfig& config, std::string& error
                 return false;
             }
             config.cameraChangeSeconds = v;
+
+        } else if (std::strcmp(opt, "--mobs") == 0) {
+            long v = 0;
+            if (!parseLong(value, v) || v < 0 || v > 5000) {
+                error = outOfRange("--mobs", value, "un entero entre 0 y 5000");
+                return false;
+            }
+            config.mobCount = static_cast<int>(v);
 
         } else if (std::strcmp(opt, "--assets") == 0) {
             config.assetsDir = value;

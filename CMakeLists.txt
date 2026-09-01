@@ -50,6 +50,7 @@ add_library(mcss_common STATIC
     common/block_catalog.cpp
     common/texture_atlas.cpp
     common/render.cpp
+    common/mob_renderer.cpp
     common/app_config.cpp
 )
 target_include_directories(mcss_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/common)
