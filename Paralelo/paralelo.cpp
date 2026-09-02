@@ -1112,15 +1112,19 @@ static bool blockIsVisible(const World& world, const Block& b) {
 }
 
 static size_t buildInstanceBuffer(const World& world, const uint32_t* faceTex,
-                                  InstanceData* instances) {
+                                  InstanceData* instances, uint8_t* visibleFlags) {
     const float offset = world.side * 0.5f - 0.5f;
     const size_t blockCount = world.blocks.size();
     std::vector<size_t> prefix(static_cast<size_t>(omp_get_max_threads()) + 1, 0);
     size_t visibleTotal = 0;
 
-    // Primera pasada: cada hilo cuenta sus instancias visibles. La suma de
+    // Primera pasada: cada hilo evalua la visibilidad de sus bloques, guarda el
+    // resultado en visibleFlags y cuenta cuantos son visibles. La suma de
     // prefijos asigna rangos de salida exclusivos y deterministas. La segunda
-    // pasada escribe el buffer sin atomicos y conserva el orden original.
+    // pasada solo consulta la marca ya calculada, de modo que las seis lecturas
+    // dispersas de la rejilla de ocupacion se hacen una sola vez por bloque y
+    // por fotograma, en lugar de dos. Cada hilo escribe unicamente las
+    // posiciones de visibleFlags que caen en su propio intervalo.
     #pragma omp parallel shared(visibleTotal)
     {
         const int threadId    = omp_get_thread_num();
@@ -1132,7 +1136,9 @@ static size_t buildInstanceBuffer(const World& world, const uint32_t* faceTex,
 
         size_t localCount = 0;
         for (size_t i = begin; i < end; ++i) {
-            if (blockIsVisible(world, world.blocks[i])) ++localCount;
+            const bool visible = blockIsVisible(world, world.blocks[i]);
+            visibleFlags[i] = visible ? 1u : 0u;
+            if (visible) ++localCount;
         }
         prefix[static_cast<size_t>(threadId) + 1] = localCount;
 
@@ -1148,8 +1154,8 @@ static size_t buildInstanceBuffer(const World& world, const uint32_t* faceTex,
 
         size_t output = prefix[static_cast<size_t>(threadId)];
         for (size_t i = begin; i < end; ++i) {
+            if (!visibleFlags[i]) continue;   // resultado memoizado en la pasada 1
             const Block& b = world.blocks[i];
-            if (!blockIsVisible(world, b)) continue;
 
             InstanceData& inst = instances[output++];
             inst.x       = static_cast<float>(b.gx) - offset;
@@ -1496,6 +1502,8 @@ int main(int argc, char** argv) {
 
     std::vector<InstanceData> instances(world.blocks.size());
     std::vector<InstanceData> shadowInstances;
+    // Una marca de visibilidad por bloque, reutilizada en cada fotograma.
+    std::vector<uint8_t> visibleFlags(world.blocks.size(), 0);
     std::vector<Mob> mobs;
     std::vector<MobInstanceData> pigInstances;
     std::vector<MobInstanceData> cowInstances;
@@ -1562,6 +1570,7 @@ int main(int argc, char** argv) {
             seed = (cfg.seed != 0) ? cfg.seed : randomDevice();
             genMs = generateWorld(cfg, seed, world);
             instances.assign(world.blocks.size(), InstanceData{});
+            visibleFlags.assign(world.blocks.size(), 0);
             shadowInstances.clear();
             mobs.clear();
             pigInstances.clear();
@@ -1603,7 +1612,7 @@ int main(int argc, char** argv) {
         }
 
         drawnBlocks = buildInstanceBuffer(world, faceTexTables[world.biomeIndex].data(),
-                                          instances.data());
+                                          instances.data(), visibleFlags.data());
 
         // --- Camara ----------------------------------------------------------
         // El modo orbit conserva la toma original. El modo auto alterna entre
