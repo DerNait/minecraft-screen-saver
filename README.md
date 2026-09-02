@@ -181,17 +181,27 @@ mapa de profundidad continúa ejecutándose en la GPU desde el hilo principal.
 
 ## Avance 1 — ubicación en el código
 
+Los tres elementos que pedía el Avance 1, ubicados en el código **actual**. Los
+nombres cambiaron desde aquella entrega: `terrain` pasó a vivir dentro de la
+estructura `World`, y `renderTerrain()` y `updateBlock()` se reorganizaron en las
+funciones que hoy recorren todos los bloques de una vez.
+
 - **Variable en memoria que almacena los elementos a renderizar**:
-  `std::vector<Block> terrain;` en `Secuencial/secuencial.cpp:30`. Cada `Block`
-  es un bloque/voxel del terreno (posición actual, posición final, color y
-  estado de física).
-- **Función de render de un elemento**: `renderTerrain()` en
-  `Secuencial/secuencial.cpp:182`. Recorre `terrain` y dibuja todos los
-  bloques con instanced rendering (un solo draw call).
+  `std::vector<Block> blocks;` dentro de `struct World`, en
+  `Secuencial/secuencial.cpp:118`. Cada `Block` (definido en
+  `Secuencial/secuencial.cpp:96`) es un bloque/voxel del terreno: posición en la
+  retícula, posición actual de caída, tipo, estado de la máquina de estados e
+  instantes de aparición y desvanecimiento.
+- **Función de render de un elemento**: `buildInstanceBuffer()` en
+  `Secuencial/secuencial.cpp:1125`. Recorre `world.blocks`, descarta los que no
+  son visibles y empaqueta el resto en el arreglo que consume la GPU; el dibujo
+  se emite después con un solo draw call instanciado en
+  `CubeRenderer::draw()` (`Secuencial/secuencial.cpp:1703`).
 - **Función de actualización (cómo determina su siguiente ubicación)**:
-  `updateBlock()` en `Secuencial/secuencial.cpp:67`. Aplica una integración
-  de gravedad sobre la posición actual del bloque hasta que llega a su
-  posición final en el terreno.
+  `updateWorld()` en `Secuencial/secuencial.cpp:1030`. Avanza la máquina de
+  estados de cada bloque y, mientras está cayendo, aplica una integración de
+  Euler de la gravedad sobre su posición hasta que se asienta en su posición
+  final.
 
 ## Mediciones: speedup, eficiencia y FPS
 
