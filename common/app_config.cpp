@@ -77,11 +77,19 @@ void printUsage(const char* programName) {
         "  --shadow-distance <n> Radio local de sombras.     (16 - 128, def. 48)\n"
         "  --help                Muestra esta ayuda.\n"
         "\n"
+        "Modo de medicion (para el calculo de speedup y eficiencia):\n"
+        "  --benchmark <f>       Mide f fotogramas y termina.  (30 - 200000)\n"
+        "  --bench-warmup <f>    Fotogramas descartados antes. (0-100000, def. 120)\n"
+        "  --bench-gen <n>       Generaciones cronometradas.   (1 - 100, def. 5)\n"
+        "  --bench-csv <ruta>    Detalle por fotograma en un CSV.\n"
+        "  --bench-tag <texto>   Etiqueta libre copiada al informe.\n"
+        "\n"
         "Ejemplos:\n"
         "  %s 50000\n"
         "  %s 250000 --width 1600 --height 900 --seed 1234\n"
-        "  %s 500000 --no-vsync --relief 1.5\n",
-        programName, programName, programName, programName);
+        "  %s 500000 --no-vsync --relief 1.5\n"
+        "  %s 500000 --benchmark 300 --build 1 --hold 60 --seed 20260901\n",
+        programName, programName, programName, programName, programName);
 }
 
 bool parseArguments(int argc, char** argv, AppConfig& config, std::string& error) {
@@ -272,6 +280,43 @@ bool parseArguments(int argc, char** argv, AppConfig& config, std::string& error
                 return false;
             }
             config.shadowDistance = v;
+
+        } else if (std::strcmp(opt, "--benchmark") == 0) {
+            long v = 0;
+            if (!parseLong(value, v) || v < 30 || v > 200000) {
+                error = outOfRange("--benchmark", value,
+                                   "un entero entre 30 y 200000");
+                return false;
+            }
+            config.benchFrames = static_cast<int>(v);
+
+        } else if (std::strcmp(opt, "--bench-warmup") == 0) {
+            long v = 0;
+            if (!parseLong(value, v) || v < 0 || v > 100000) {
+                error = outOfRange("--bench-warmup", value,
+                                   "un entero entre 0 y 100000");
+                return false;
+            }
+            config.benchWarmup = static_cast<int>(v);
+
+        } else if (std::strcmp(opt, "--bench-gen") == 0) {
+            long v = 0;
+            if (!parseLong(value, v) || v < 1 || v > 100) {
+                error = outOfRange("--bench-gen", value,
+                                   "un entero entre 1 y 100");
+                return false;
+            }
+            config.benchGenReps = static_cast<int>(v);
+
+        } else if (std::strcmp(opt, "--bench-csv") == 0) {
+            if (value[0] == '\0') {
+                error = "la opcion '--bench-csv' requiere una ruta no vacia.";
+                return false;
+            }
+            config.benchCsv = value;
+
+        } else if (std::strcmp(opt, "--bench-tag") == 0) {
+            config.benchTag = value;
 
         } else if (std::strcmp(opt, "--assets") == 0) {
             config.assetsDir = value;

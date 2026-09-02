@@ -44,6 +44,17 @@ struct AppConfig {
     std::string shadowMode = "off"; // off = sin pase extra, near = sombras locales
     float       shadowDistance = 48.0f; // radio en bloques alrededor de la vista
     bool        showHelp = false; // el usuario pidio la ayuda
+
+    // --- Modo de medicion (identico en ambas versiones) ----------------------
+    //  Con benchFrames > 0 el programa deja de comportarse como protector de
+    //  pantalla interactivo: usa un reloj virtual de paso fijo, desactiva la
+    //  sincronizacion vertical, cronometra una cantidad exacta de fotogramas y
+    //  al terminar imprime un informe legible por el script de metricas.
+    int         benchFrames  = 0;    // 0 = modo normal; >0 = fotogramas a medir
+    int         benchWarmup  = 120;  // fotogramas de calentamiento descartados
+    int         benchGenReps = 5;    // generaciones de mundo a cronometrar
+    std::string benchCsv;            // CSV por fotograma; vacia = no se escribe
+    std::string benchTag;            // etiqueta libre que se copia al informe
 };
 
 // ----------------------------------------------------------------------------

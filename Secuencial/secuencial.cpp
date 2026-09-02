@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "app_config.hpp"
+#include "benchmark.hpp"
 #include "block_catalog.hpp"
 #include "mob_renderer.hpp"
 #include "noise.hpp"
@@ -1160,6 +1161,24 @@ static bool registerAllTextures(TextureAtlas& atlas,
     return true;
 }
 
+// Semilla usada al medir cuando el usuario no indica una: fija el mundo para
+// que todas las repeticiones y ambas versiones trabajen sobre lo mismo.
+static constexpr uint32_t kBenchmarkSeed = 20260901u;
+
+// ----------------------------------------------------------------------------
+//  elapsedMsAndReset
+//  Entradas/Salidas: mark - marca de tiempo que se adelanta al instante actual
+//  Retorno : milisegundos transcurridos desde esa marca
+//  Descripcion: cronometra una etapa del fotograma y deja la marca lista para
+//  la siguiente, sin repetir la misma expresion de std::chrono en cada etapa.
+// ----------------------------------------------------------------------------
+static double elapsedMsAndReset(std::chrono::steady_clock::time_point& mark) {
+    const auto ahora = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(ahora - mark).count();
+    mark = ahora;
+    return ms;
+}
+
 // ============================================================================
 //  PROGRAMA PRINCIPAL
 // ============================================================================
@@ -1185,6 +1204,17 @@ int main(int argc, char** argv) {
     if (cfg.threads != 0) {
         std::fprintf(stderr,
                      "Aviso: --threads no tiene efecto en la version secuencial.\n");
+    }
+
+    // --- Modo de medicion ----------------------------------------------------
+    // Con --benchmark el programa deja de depender del reloj real, del monitor
+    // y del azar: paso de tiempo fijo, sin sincronizacion vertical y con una
+    // semilla conocida, para que ambas versiones midan el mismo trabajo.
+    Benchmark bench;
+    bench.start(cfg);
+    if (bench.active()) {
+        cfg.vsync = false;
+        if (cfg.seed == 0) cfg.seed = kBenchmarkSeed;
     }
 
     // --- 2. Localizacion de las texturas -------------------------------------
@@ -1348,6 +1378,11 @@ int main(int argc, char** argv) {
     } else {
         std::printf("Sombras    : desactivadas (use --shadows near con iluminacion cycle)\n");
     }
+    if (bench.active()) {
+        std::printf("Medicion   : %d fotogramas medidos, %d de calentamiento | "
+                    "paso fijo 1/60 s | vsync desactivado | semilla %u\n",
+                    cfg.benchFrames, cfg.benchWarmup, cfg.seed);
+    }
 
     // --- 5. Generacion del primer mundo --------------------------------------
     // Semilla: la indicada por el usuario, o una sorteada por el sistema.
@@ -1356,6 +1391,12 @@ int main(int argc, char** argv) {
 
     World world;
     double genMs = generateWorld(cfg, seed, world);
+    bench.addGeneration(genMs);
+    // Con la semilla fija todas las repeticiones producen el mismo mundo, asi
+    // que el promedio mide unicamente el costo de generarlo.
+    for (int rep = 1; bench.active() && rep < bench.generations(); ++rep) {
+        bench.addGeneration(generateWorld(cfg, seed, world));
+    }
 
     std::vector<InstanceData> instances(world.blocks.size());
     std::vector<InstanceData> shadowInstances;
@@ -1373,7 +1414,7 @@ int main(int argc, char** argv) {
 
     // --- 6. Bucle principal ---------------------------------------------------
     Phase  phase        = Phase::Building;
-    double cycleStart   = glfwGetTime();
+    double cycleStart   = bench.active() ? 0.0 : glfwGetTime();
     double lastTime     = cycleStart;
     double fpsTimer     = cycleStart;
     int    frameCount   = 0;
@@ -1385,14 +1426,30 @@ int main(int argc, char** argv) {
     double cpuMsAccum   = 0.0;   // tiempo de CPU acumulado del fotograma
     bool   mobsSpawned  = false; // aparecen cuando el terreno queda armado
 
-    while (!glfwWindowShouldClose(window)) {
-        double now = glfwGetTime();
-        float  dt  = static_cast<float>(now - lastTime);
-        lastTime = now;
+    double benchClock = 0.0;      // reloj virtual usado solo al medir
 
-        // Un fotograma muy largo (por ejemplo al arrastrar la ventana) haria
-        // que los bloques atravesaran el suelo: se acota el paso de tiempo.
-        if (dt > 0.05f) dt = 0.05f;
+    while (!glfwWindowShouldClose(window)) {
+        const auto frameStart = std::chrono::steady_clock::now();
+        FrameTiming timing;       // desglose de esta iteracion, en milisegundos
+
+        // Al medir, el tiempo avanza en pasos fijos de 1/60 s: la simulacion
+        // recorre exactamente los mismos estados en la version secuencial y en
+        // la paralela sin importar cuanto tarde cada maquina en dibujar. Fuera
+        // del modo de medicion se usa el reloj real de GLFW.
+        double now;
+        float  dt;
+        if (bench.active()) {
+            benchClock += Benchmark::kFixedDeltaSeconds;
+            now = benchClock;
+            dt  = static_cast<float>(Benchmark::kFixedDeltaSeconds);
+        } else {
+            now = glfwGetTime();
+            dt  = static_cast<float>(now - lastTime);
+            // Un fotograma muy largo (por ejemplo al arrastrar la ventana) haria
+            // que los bloques atravesaran el suelo: se acota el paso de tiempo.
+            if (dt > 0.05f) dt = 0.05f;
+        }
+        lastTime = now;
 
         glfwPollEvents();
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
@@ -1404,7 +1461,10 @@ int main(int argc, char** argv) {
 
         // Solo el instante en que se presiona ESPACIO cuenta como peticion, no
         // cada fotograma en que la tecla siga hundida.
-        bool spaceIsDown = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+        // Al medir se ignora ESPACIO: generar un mundo nuevo fuera de tiempo
+        // arruinaria la repetibilidad de la prueba.
+        bool spaceIsDown = !bench.active() &&
+                           (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
         bool regenerate  = spaceIsDown && !spaceWasDown;
         spaceWasDown = spaceIsDown;
 
@@ -1433,7 +1493,7 @@ int main(int argc, char** argv) {
             mobsSpawned = false;
             liveBlocks = world.blocks.size();
             phase      = Phase::Building;
-            cycleStart = glfwGetTime();
+            cycleStart = bench.active() ? benchClock : glfwGetTime();
             lastTime   = cycleStart;
 
             std::printf("Mundo nuevo: semilla %u | bioma %s | reticula %dx%dx%d | "
@@ -1445,9 +1505,11 @@ int main(int argc, char** argv) {
         }
 
         // --- Trabajo de CPU proporcional a N ---------------------------------
-        auto cpuStart = std::chrono::steady_clock::now();
+        const auto cpuStart = std::chrono::steady_clock::now();
+        auto etapa = cpuStart;    // marca movil que cronometra etapa por etapa
 
         updateWorld(world, elapsed, dt, liveBlocks);
+        timing.updateMs = elapsedMsAndReset(etapa);
 
         if (phase == Phase::Holding && cfg.mobCount > 0) {
             if (!mobsSpawned) {
@@ -1464,9 +1526,12 @@ int main(int argc, char** argv) {
             cowInstances.clear();
             sheepInstances.clear();
         }
+        timing.mobsMs = elapsedMsAndReset(etapa);
 
         drawnBlocks = buildInstanceBuffer(world, faceTexTables[world.biomeIndex].data(),
                                           instances.data());
+
+        timing.buildMs = elapsedMsAndReset(etapa);
 
         // --- Camara ----------------------------------------------------------
         // El modo orbit conserva la toma original. El modo auto alterna entre
@@ -1479,6 +1544,9 @@ int main(int argc, char** argv) {
             environment = calculateDayNight(world, cfg, now, camera.eye);
         }
 
+        // La camara y el estado de iluminacion cuestan lo mismo con cualquier N,
+        // asi que no forman parte de ninguna etapa cronometrada.
+        etapa = std::chrono::steady_clock::now();
         NearShadowView shadowView{};
         size_t shadowBlockCount = 0;
         if (shadowsEnabled) {
@@ -1495,8 +1563,10 @@ int main(int argc, char** argv) {
             environment.lighting.shadowRadius = shadowView.radius;
         }
 
-        cpuMsAccum += std::chrono::duration<double, std::milli>(
-                          std::chrono::steady_clock::now() - cpuStart).count();
+        timing.shadowMs = elapsedMsAndReset(etapa);
+        timing.cpuMs = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - cpuStart).count();
+        cpuMsAccum += timing.cpuMs;
 
         int fbWidth = 0, fbHeight = 0;
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
@@ -1547,6 +1617,20 @@ int main(int argc, char** argv) {
                                environment.lighting);
         glfwSwapBuffers(window);
 
+        // --- Registro de la medicion -----------------------------------------
+        // glFinish espera a que la GPU termine el fotograma: sin esa espera el
+        // driver podria encolar trabajo y el tiempo medido saldria optimista.
+        if (bench.active()) {
+            glFinish();
+            timing.frameMs = std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - frameStart).count();
+            timing.phase = phase == Phase::Building   ? 'B' :
+                           phase == Phase::Holding    ? 'H' :
+                           phase == Phase::Dissolving ? 'D' : 'P';
+            bench.addFrame(timing, drawnBlocks);
+            if (bench.complete()) glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+
         // --- Indicador de FPS en el titulo de la ventana ----------------------
         ++frameCount;
         if (now - fpsTimer >= 1.0) {
@@ -1573,6 +1657,24 @@ int main(int argc, char** argv) {
         }
     }
 
+    // --- Informe de la medicion ----------------------------------------------
+    int exitCode = EXIT_SUCCESS;
+    if (bench.active()) {
+        BenchmarkInfo info;
+        info.version      = "secuencial";
+        info.threads      = 1;
+        info.targetBlocks = cfg.targetBlocks;
+        info.worldBlocks  = world.blocks.size();
+        info.seed         = world.seed;
+        info.biome        = world.biome->name;
+
+        std::string benchError;
+        if (!bench.report(info, benchError)) {
+            std::fprintf(stderr, "Error: %s\n", benchError.c_str());
+            exitCode = EXIT_FAILURE;
+        }
+    }
+
     // --- 7. Liberacion ordenada de recursos ----------------------------------
     sheepWoolRenderer.destroy();
     sheepRenderer.destroy();
@@ -1584,5 +1686,5 @@ int main(int argc, char** argv) {
     atlas.destroy();
     glfwDestroyWindow(window);
     glfwTerminate();
-    return EXIT_SUCCESS;
+    return exitCode;
 }

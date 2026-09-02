@@ -156,6 +156,116 @@ mapa de profundidad continúa ejecutándose en la GPU desde el hilo principal.
   de gravedad sobre la posición actual del bloque hasta que llega a su
   posición final en el terreno.
 
+## Mediciones: speedup, eficiencia y FPS
+
+Ambos ejecutables comparten un modo de medicion (`--benchmark`) que sustituye el
+comportamiento interactivo del protector de pantalla por una prueba repetible:
+
+- **Paso de tiempo fijo de 1/60 s.** La simulacion avanza siempre lo mismo, sin
+  importar que tan rapido corra la maquina; asi la version secuencial y la
+  paralela ejecutan exactamente el mismo trabajo.
+- **Semilla fija** (`20260901` si no se indica otra), de modo que el mundo
+  generado sea identico en cada repeticion y entre versiones.
+- **Sin sincronizacion vertical**, para que el monitor no imponga un techo
+  artificial de 60 FPS.
+- **Fotogramas de calentamiento descartados**, para que la subida de texturas a
+  la GPU y el arranque del planificador de OpenMP no contaminen los promedios.
+- **`glFinish()` antes de cerrar el cronometro** de cada fotograma, para que el
+  tiempo medido incluya el trabajo real de la GPU y no solo el encolado.
+
+Al terminar, el programa imprime un informe `clave=valor` con el tiempo de
+generacion del mundo, el desglose por etapa (`update`, `build`, sombras), el
+tiempo de CPU y de fotograma completo, los FPS promedio y minimos, y cuantos
+fotogramas quedaron por debajo de los 60 FPS que pide el enunciado.
+
+```bash
+./build/secuencial.exe 2000000 --benchmark 300 --bench-warmup 120 --build 1 --hold 120
+./build/paralelo.exe   2000000 --benchmark 300 --threads 12 --build 1 --hold 120
+./build/paralelo.exe   2000000 --benchmark 300 --bench-csv detalle.csv
+```
+
+### Script de metricas y graficas
+
+`metricas/medir_y_graficar.py` compila el proyecto, repite cada prueba, guarda
+los CSV y dibuja las graficas comparativas:
+
+```bash
+python metricas/medir_y_graficar.py
+python metricas/medir_y_graficar.py --n 500000 --hilos 1 2 4 8 --repeticiones 10
+python metricas/medir_y_graficar.py --sin-compilar --sin-detalle
+```
+
+Opciones principales: `--n` (valores de N a probar), `--hilos`, `--repeticiones`
+(10 por omision, el minimo que pide la bitacora de pruebas), `--frames`,
+`--calentamiento`, `--generaciones`, `--semilla`, `--ancho`, `--alto`,
+`--sin-compilar`, `--sin-detalle` y `--solo-graficas` (redibuja desde
+`resumen.csv` sin volver a medir). Requiere `matplotlib`
+(`python -m pip install matplotlib`).
+
+Todo queda en `metricas/resultados/`:
+
+| Archivo | Contenido |
+| --- | --- |
+| `mediciones_crudas.csv` | Una fila por ejecucion, con todas las repeticiones. |
+| `resumen.csv` | Promedios, speedup y eficiencia por combinacion de N e hilos. |
+| `detalle_secuencial.csv`, `detalle_paralelo.csv` | Tiempos fotograma a fotograma. |
+| `speedup_vs_hilos.png` | Speedup medido contra el speedup ideal. |
+| `eficiencia_vs_hilos.png` | Eficiencia (speedup / hilos) por configuracion. |
+| `tiempo_cpu_vs_hilos.png` | Tiempo de CPU por fotograma contra la linea base. |
+| `fps_vs_hilos.png` | FPS alcanzados frente al minimo de 60 FPS. |
+| `etapas_por_fotograma.png` | Desglose `update` / `build` / CPU total. |
+| `generacion_vs_hilos.png` | Costo de generar un mundo completo. |
+| `speedup_vs_n.png` | Como escala el speedup al crecer N. |
+| `fps_por_fotograma.png` | Estabilidad del ritmo durante la medicion. |
+
+### Resultados obtenidos
+
+Equipo de prueba: Intel Core i5-12400 (6 nucleos fisicos, 12 hilos logicos), ventana de
+1280x720, 10 repeticiones de 300 fotogramas por configuracion, semilla 20260901.
+Los valores completos estan en `metricas/resultados/resumen.csv`.
+
+| N | Bloques | CPU secuencial | CPU paralelo (12 h) | Speedup | Eficiencia | FPS secuencial | FPS paralelo |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 100 000 | 95 874 | 0.51 ms | 0.41 ms | 1.25x | 10.4 % | 1113 | 1235 |
+| 500 000 | 482 184 | 2.99 ms | 1.19 ms | 2.52x | 21.0 % | 232 | 393 |
+| 2 000 000 | 1 918 719 | 12.23 ms | 4.48 ms | 2.73x | 22.7 % | 53 | 117 |
+
+El speedup se satura en 8 hilos (2.73x, 34.2 % de eficiencia con N = 2 000 000).
+Pasar a 12 no aporta nada porque el equipo tiene 6 nucleos fisicos: los hilos
+adicionales son hilos logicos SMT que comparten las mismas unidades de ejecucion.
+
+El caso decisivo es N = 2 000 000: la version secuencial promedia 53 FPS y deja
+264 de 300 fotogramas por debajo de los 60 FPS, mientras que la paralela sostiene
+117 FPS y menos de un fotograma por corrida por debajo del limite. Es decir, la
+paralelizacion no solo acelera el calculo: es lo que permite mantener la
+experiencia de usuario que pide el enunciado con esa cantidad de elementos.
+
+Con N = 100 000 la mejora es marginal: el trabajo por fotograma (0.5 ms) es tan
+pequeno que el costo de abrir y cerrar las regiones paralelas se come casi toda
+la ganancia. Ese efecto se ve tambien en la fila de 1 hilo del `resumen.csv`,
+donde la version paralela resulta entre 21 % y 27 % mas lenta que la secuencial:
+es el sobrecosto puro de OpenMP, sin ningun hilo extra que lo compense.
+
+La generacion del mundo, en cambio, escala mejor que el bucle por fotograma
+(3.85x con 12 hilos y N = 2 000 000) porque es un bloque de trabajo grande y
+contiguo, sin sincronizacion con la GPU de por medio.
+
+### Como leer los numeros
+
+Se reportan tres speedups distintos porque miden cosas distintas:
+
+- **Speedup de CPU** (`speedup_cpu`): sobre el trabajo por fotograma que OpenMP
+  reparte. Es el que corresponde a la parte paralelizada del programa.
+- **Speedup de generacion** (`speedup_generacion`): sobre la construccion
+  completa del mundo, el bucle con mayor fraccion paralelizable.
+- **Speedup de fotograma** (`speedup_frame`): sobre la iteracion completa. Es
+  siempre menor porque incluye el dibujo en la GPU, que es identico en las dos
+  versiones y actua como la fraccion serial de la ley de Amdahl.
+
+La eficiencia se calcula como `speedup / hilos`. Cae al agregar hilos porque la
+parte no paralelizable (dibujo, presentacion, sincronizacion) crece en peso
+relativo, y porque los hilos logicos de SMT no aportan un nucleo completo.
+
 ## Dependencias
 
 Requiere MSYS2 con el toolchain **UCRT64** (gcc/g++ con soporte OpenMP incluido)
@@ -190,3 +300,99 @@ Esto genera `build/secuencial.exe` y `build/paralelo.exe`.
 
 `N` = cantidad de bloques del terreno a generar (entero positivo, obligatorio).
 El FPS actual se muestra en el título de la ventana.
+
+## Parametros de linea de comandos
+
+Los dos ejecutables aceptan exactamente las mismas opciones. Ningun valor esta
+escrito de forma fija en el codigo: todos se leen aqui, con un rango verificado
+antes de arrancar. Si un valor no es numerico, queda fuera de rango, falta el
+valor de una opcion o la opcion no existe, el programa explica el error, imprime
+la ayuda completa y termina sin abrir la ventana.
+
+```bash
+./build/paralelo.exe --help          # lista completa con rangos y omisiones
+```
+
+### Argumento obligatorio
+
+| Parametro | Rango | Descripcion |
+| --- | --- | --- |
+| `N` | 64 a 20 000 000 | Cantidad objetivo de bloques a renderizar. Es el unico argumento posicional y va siempre primero. El programa deduce de N el lado de la reticula, asi que la cantidad final de bloques es la aproximacion mas cercana (por ejemplo, N = 500 000 genera 482 184 bloques con la semilla de prueba). |
+
+### Ventana
+
+| Parametro | Rango | Omision | Descripcion |
+| --- | --- | --- | --- |
+| `--width <px>` | 640 a 16384 | 1280 | Ancho del lienzo en pixeles. El minimo respeta el tamano de canvas que pide el enunciado. |
+| `--height <px>` | 480 a 16384 | 720 | Alto del lienzo en pixeles. |
+| `--no-vsync` | sin valor | vsync activo | Desactiva la sincronizacion vertical. Sin esta opcion el monitor limita el programa a su frecuencia de refresco y los FPS medidos no pasan de ~60. El modo `--benchmark` la activa solo. |
+
+### Mundo
+
+| Parametro | Rango | Omision | Descripcion |
+| --- | --- | --- | --- |
+| `--seed <n>` | entero >= 0 | 0 | Semilla del mundo. Con 0 se sortea una nueva en cada arranque y en cada ciclo; con un valor fijo el terreno, el bioma y la vegetacion se repiten identicos, que es lo que hace reproducibles las mediciones. |
+| `--relief <f>` | 0.2 a 4.0 | 1.0 | Multiplicador global del relieve. Valores bajos aplanan el terreno; valores altos exageran montanas y valles. |
+| `--biome <n>` | -1 a 64 | -1 | Fuerza un bioma por indice (se normaliza contra la cantidad de biomas disponibles). Con -1 lo elige la semilla. |
+
+### Tiempos del ciclo del protector de pantalla
+
+El ciclo es: construir el terreno, sostenerlo, desarmarlo y pausar antes del
+mundo siguiente.
+
+| Parametro | Rango | Omision | Descripcion |
+| --- | --- | --- | --- |
+| `--build <s>` | 0.5 a 120 | 6.0 | Segundos que tarda el terreno en armarse capa por capa. |
+| `--hold <s>` | 0 a 120 | 4.0 | Segundos que el mundo permanece completo. Es la fase donde conviene medir, porque todos los bloques estan vivos. |
+| `--dissolve <s>` | 0.5 a 120 | 3.0 | Segundos que tarda el desarmado, de arriba hacia abajo. |
+| `--pause <s>` | 0 a 60 | 0.8 | Pausa en negro antes de generar el mundo siguiente. |
+
+### Camara, iluminacion y mobs
+
+| Parametro | Rango | Omision | Descripcion |
+| --- | --- | --- | --- |
+| `--camera <modo>` | `orbit` o `auto` | `orbit` | `orbit` mantiene la orbita exterior original. `auto` alterna entre cinco encuadres (orbita exterior, panoramica interior, orbita interior, diagonal elevada y vista cenital) con transiciones elevadas. |
+| `--camera-change <s>` | 2 a 120 | 10.0 | Segundos entre cambios de encuadre. Solo tiene efecto con `--camera auto`. |
+| `--mobs <n>` | 0 a 5000 | 0 | Cantidad de animales (cerdos, vacas y ovejas) que aparecen cuando el mundo queda armado. Su IA es secuencial en ambas versiones; el valor 0 deja el benchmark de terreno sin contaminar. |
+| `--lighting <modo>` | `classic` o `cycle` | `classic` | `classic` conserva el sombreado fijo por cara. `cycle` activa el ciclo de dia y noche con skybox procedural, sol, luna, estrellas y nubes. |
+| `--day-cycle <s>` | 10 a 600 | 60.0 | Duracion de un dia completo en modo `cycle`: 70 % de recorrido diurno y 30 % nocturno. |
+| `--shadows <modo>` | `off` o `near` | `off` | `near` agrega un mapa de sombras de 2048 x 2048 centrado en la camara. **Requiere `--lighting cycle`**; combinarlo con `classic` es un error y el programa lo rechaza. |
+| `--shadow-distance <n>` | 16 a 128 | 48.0 | Radio en bloques alrededor de la vista que proyecta sombra. Un radio mayor cubre mas terreno pero reparte la misma resolucion sobre mas superficie, asi que las sombras pierden nitidez. |
+
+### Ejecucion
+
+| Parametro | Rango | Omision | Descripcion |
+| --- | --- | --- | --- |
+| `--threads <n>` | 1 a 256 | los del sistema | Cantidad de hilos de OpenMP. Solo tiene efecto en `paralelo`; en `secuencial` el programa avisa por la salida de error y lo ignora. Se desactiva el ajuste dinamico de OpenMP para que el valor pedido sea el que realmente se use. |
+| `--assets <ruta>` | ruta valida | busqueda automatica | Carpeta con las texturas `.png`. Sin esta opcion el programa busca `assets/textures` a partir del directorio actual. |
+| `--help`, `-h` | sin valor | - | Imprime la lista completa de opciones con sus rangos y termina. Se detecta en cualquier posicion, incluso si el resto de los argumentos esta mal escrito. |
+
+### Modo de medicion
+
+Estas opciones son las que producen los numeros de speedup y eficiencia. Ver la
+seccion [Mediciones](#mediciones-speedup-eficiencia-y-fps) para el detalle de
+como funcionan.
+
+| Parametro | Rango | Omision | Descripcion |
+| --- | --- | --- | --- |
+| `--benchmark <f>` | 30 a 200 000 | 0 (desactivado) | Cronometra `f` fotogramas y termina imprimiendo el informe `clave=valor`. Al activarse fija el paso de tiempo en 1/60 s, desactiva la sincronizacion vertical, ignora la tecla ESPACIO y usa la semilla 20260901 si no se indico otra. |
+| `--bench-warmup <f>` | 0 a 100 000 | 120 | Fotogramas descartados antes de empezar a medir. Con el valor por omision y `--build 1` la medicion cae completa en la fase sostenida. |
+| `--bench-gen <n>` | 1 a 100 | 5 | Generaciones completas del mundo que se cronometran antes del bucle principal. Todas usan la misma semilla, asi que el promedio mide solo el costo de generar. |
+| `--bench-csv <ruta>` | ruta no vacia | no se escribe | Guarda un CSV con el desglose de cada fotograma medido (fase, update, build, sombras, CPU, fotograma completo y FPS). |
+| `--bench-tag <texto>` | texto libre | vacio | Etiqueta que se copia tal cual al informe. Sirve para identificar la corrida cuando se automatizan muchas. |
+
+### Ejemplos
+
+```bash
+# Protector de pantalla normal
+./build/paralelo.exe 500000
+
+# Mundo grande, todas las funciones visuales, 12 hilos
+./build/paralelo.exe 2000000 --threads 12 --camera auto --mobs 30 --lighting cycle --shadows near --hold 30
+
+# Terreno plano y reproducible, sin vsync, para inspeccionar a ojo
+./build/secuencial.exe 300000 --seed 1234 --relief 0.4 --no-vsync
+
+# Medicion de 300 fotogramas en fase sostenida, con detalle por fotograma
+./build/paralelo.exe 2000000 --benchmark 300 --bench-warmup 120 --build 1 --hold 120 --threads 8 --bench-csv detalle.csv
+```

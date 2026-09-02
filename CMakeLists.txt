@@ -54,6 +54,7 @@ add_library(mcss_common STATIC
     common/sky_renderer.cpp
     common/shadow_map.cpp
     common/app_config.cpp
+    common/benchmark.cpp
 )
 target_include_directories(mcss_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/common)
 target_link_libraries(mcss_common PUBLIC

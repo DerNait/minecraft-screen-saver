@@ -1,0 +1,214 @@
+Equipo     : Intel64 Family 6 Model 151 Stepping 5, GenuineIntel | 12 hilos logicos
+Pruebas    : N = [100000, 500000, 2000000] | hilos = [1, 2, 4, 8, 12] | 10 repeticiones de 300 fotogramas
+
+[1/180] N=100000 secuencial 1 hilo(s), repeticion 1
+[2/180] N=100000 secuencial 1 hilo(s), repeticion 2
+[3/180] N=100000 secuencial 1 hilo(s), repeticion 3
+[4/180] N=100000 secuencial 1 hilo(s), repeticion 4
+[5/180] N=100000 secuencial 1 hilo(s), repeticion 5
+[6/180] N=100000 secuencial 1 hilo(s), repeticion 6
+[7/180] N=100000 secuencial 1 hilo(s), repeticion 7
+[8/180] N=100000 secuencial 1 hilo(s), repeticion 8
+[9/180] N=100000 secuencial 1 hilo(s), repeticion 9
+[10/180] N=100000 secuencial 1 hilo(s), repeticion 10
+[11/180] N=100000 paralelo 1 hilo(s), repeticion 1
+[12/180] N=100000 paralelo 1 hilo(s), repeticion 2
+[13/180] N=100000 paralelo 1 hilo(s), repeticion 3
+[14/180] N=100000 paralelo 1 hilo(s), repeticion 4
+[15/180] N=100000 paralelo 1 hilo(s), repeticion 5
+[16/180] N=100000 paralelo 1 hilo(s), repeticion 6
+[17/180] N=100000 paralelo 1 hilo(s), repeticion 7
+[18/180] N=100000 paralelo 1 hilo(s), repeticion 8
+[19/180] N=100000 paralelo 1 hilo(s), repeticion 9
+[20/180] N=100000 paralelo 1 hilo(s), repeticion 10
+[21/180] N=100000 paralelo 2 hilo(s), repeticion 1
+[22/180] N=100000 paralelo 2 hilo(s), repeticion 2
+[23/180] N=100000 paralelo 2 hilo(s), repeticion 3
+[24/180] N=100000 paralelo 2 hilo(s), repeticion 4
+[25/180] N=100000 paralelo 2 hilo(s), repeticion 5
+[26/180] N=100000 paralelo 2 hilo(s), repeticion 6
+[27/180] N=100000 paralelo 2 hilo(s), repeticion 7
+[28/180] N=100000 paralelo 2 hilo(s), repeticion 8
+[29/180] N=100000 paralelo 2 hilo(s), repeticion 9
+[30/180] N=100000 paralelo 2 hilo(s), repeticion 10
+[31/180] N=100000 paralelo 4 hilo(s), repeticion 1
+[32/180] N=100000 paralelo 4 hilo(s), repeticion 2
+[33/180] N=100000 paralelo 4 hilo(s), repeticion 3
+[34/180] N=100000 paralelo 4 hilo(s), repeticion 4
+[35/180] N=100000 paralelo 4 hilo(s), repeticion 5
+[36/180] N=100000 paralelo 4 hilo(s), repeticion 6
+[37/180] N=100000 paralelo 4 hilo(s), repeticion 7
+[38/180] N=100000 paralelo 4 hilo(s), repeticion 8
+[39/180] N=100000 paralelo 4 hilo(s), repeticion 9
+[40/180] N=100000 paralelo 4 hilo(s), repeticion 10
+[41/180] N=100000 paralelo 8 hilo(s), repeticion 1
+[42/180] N=100000 paralelo 8 hilo(s), repeticion 2
+[43/180] N=100000 paralelo 8 hilo(s), repeticion 3
+[44/180] N=100000 paralelo 8 hilo(s), repeticion 4
+[45/180] N=100000 paralelo 8 hilo(s), repeticion 5
+[46/180] N=100000 paralelo 8 hilo(s), repeticion 6
+[47/180] N=100000 paralelo 8 hilo(s), repeticion 7
+[48/180] N=100000 paralelo 8 hilo(s), repeticion 8
+[49/180] N=100000 paralelo 8 hilo(s), repeticion 9
+[50/180] N=100000 paralelo 8 hilo(s), repeticion 10
+[51/180] N=100000 paralelo 12 hilo(s), repeticion 1
+[52/180] N=100000 paralelo 12 hilo(s), repeticion 2
+[53/180] N=100000 paralelo 12 hilo(s), repeticion 3
+[54/180] N=100000 paralelo 12 hilo(s), repeticion 4
+[55/180] N=100000 paralelo 12 hilo(s), repeticion 5
+[56/180] N=100000 paralelo 12 hilo(s), repeticion 6
+[57/180] N=100000 paralelo 12 hilo(s), repeticion 7
+[58/180] N=100000 paralelo 12 hilo(s), repeticion 8
+[59/180] N=100000 paralelo 12 hilo(s), repeticion 9
+[60/180] N=100000 paralelo 12 hilo(s), repeticion 10
+[61/180] N=500000 secuencial 1 hilo(s), repeticion 1
+[62/180] N=500000 secuencial 1 hilo(s), repeticion 2
+[63/180] N=500000 secuencial 1 hilo(s), repeticion 3
+[64/180] N=500000 secuencial 1 hilo(s), repeticion 4
+[65/180] N=500000 secuencial 1 hilo(s), repeticion 5
+[66/180] N=500000 secuencial 1 hilo(s), repeticion 6
+[67/180] N=500000 secuencial 1 hilo(s), repeticion 7
+[68/180] N=500000 secuencial 1 hilo(s), repeticion 8
+[69/180] N=500000 secuencial 1 hilo(s), repeticion 9
+[70/180] N=500000 secuencial 1 hilo(s), repeticion 10
+[71/180] N=500000 paralelo 1 hilo(s), repeticion 1
+[72/180] N=500000 paralelo 1 hilo(s), repeticion 2
+[73/180] N=500000 paralelo 1 hilo(s), repeticion 3
+[74/180] N=500000 paralelo 1 hilo(s), repeticion 4
+[75/180] N=500000 paralelo 1 hilo(s), repeticion 5
+[76/180] N=500000 paralelo 1 hilo(s), repeticion 6
+[77/180] N=500000 paralelo 1 hilo(s), repeticion 7
+[78/180] N=500000 paralelo 1 hilo(s), repeticion 8
+[79/180] N=500000 paralelo 1 hilo(s), repeticion 9
+[80/180] N=500000 paralelo 1 hilo(s), repeticion 10
+[81/180] N=500000 paralelo 2 hilo(s), repeticion 1
+[82/180] N=500000 paralelo 2 hilo(s), repeticion 2
+[83/180] N=500000 paralelo 2 hilo(s), repeticion 3
+[84/180] N=500000 paralelo 2 hilo(s), repeticion 4
+[85/180] N=500000 paralelo 2 hilo(s), repeticion 5
+[86/180] N=500000 paralelo 2 hilo(s), repeticion 6
+[87/180] N=500000 paralelo 2 hilo(s), repeticion 7
+[88/180] N=500000 paralelo 2 hilo(s), repeticion 8
+[89/180] N=500000 paralelo 2 hilo(s), repeticion 9
+[90/180] N=500000 paralelo 2 hilo(s), repeticion 10
+[91/180] N=500000 paralelo 4 hilo(s), repeticion 1
+[92/180] N=500000 paralelo 4 hilo(s), repeticion 2
+[93/180] N=500000 paralelo 4 hilo(s), repeticion 3
+[94/180] N=500000 paralelo 4 hilo(s), repeticion 4
+[95/180] N=500000 paralelo 4 hilo(s), repeticion 5
+[96/180] N=500000 paralelo 4 hilo(s), repeticion 6
+[97/180] N=500000 paralelo 4 hilo(s), repeticion 7
+[98/180] N=500000 paralelo 4 hilo(s), repeticion 8
+[99/180] N=500000 paralelo 4 hilo(s), repeticion 9
+[100/180] N=500000 paralelo 4 hilo(s), repeticion 10
+[101/180] N=500000 paralelo 8 hilo(s), repeticion 1
+[102/180] N=500000 paralelo 8 hilo(s), repeticion 2
+[103/180] N=500000 paralelo 8 hilo(s), repeticion 3
+[104/180] N=500000 paralelo 8 hilo(s), repeticion 4
+[105/180] N=500000 paralelo 8 hilo(s), repeticion 5
+[106/180] N=500000 paralelo 8 hilo(s), repeticion 6
+[107/180] N=500000 paralelo 8 hilo(s), repeticion 7
+[108/180] N=500000 paralelo 8 hilo(s), repeticion 8
+[109/180] N=500000 paralelo 8 hilo(s), repeticion 9
+[110/180] N=500000 paralelo 8 hilo(s), repeticion 10
+[111/180] N=500000 paralelo 12 hilo(s), repeticion 1
+[112/180] N=500000 paralelo 12 hilo(s), repeticion 2
+[113/180] N=500000 paralelo 12 hilo(s), repeticion 3
+[114/180] N=500000 paralelo 12 hilo(s), repeticion 4
+[115/180] N=500000 paralelo 12 hilo(s), repeticion 5
+[116/180] N=500000 paralelo 12 hilo(s), repeticion 6
+[117/180] N=500000 paralelo 12 hilo(s), repeticion 7
+[118/180] N=500000 paralelo 12 hilo(s), repeticion 8
+[119/180] N=500000 paralelo 12 hilo(s), repeticion 9
+[120/180] N=500000 paralelo 12 hilo(s), repeticion 10
+[121/180] N=2000000 secuencial 1 hilo(s), repeticion 1
+[122/180] N=2000000 secuencial 1 hilo(s), repeticion 2
+[123/180] N=2000000 secuencial 1 hilo(s), repeticion 3
+[124/180] N=2000000 secuencial 1 hilo(s), repeticion 4
+[125/180] N=2000000 secuencial 1 hilo(s), repeticion 5
+[126/180] N=2000000 secuencial 1 hilo(s), repeticion 6
+[127/180] N=2000000 secuencial 1 hilo(s), repeticion 7
+[128/180] N=2000000 secuencial 1 hilo(s), repeticion 8
+[129/180] N=2000000 secuencial 1 hilo(s), repeticion 9
+[130/180] N=2000000 secuencial 1 hilo(s), repeticion 10
+[131/180] N=2000000 paralelo 1 hilo(s), repeticion 1
+[132/180] N=2000000 paralelo 1 hilo(s), repeticion 2
+[133/180] N=2000000 paralelo 1 hilo(s), repeticion 3
+[134/180] N=2000000 paralelo 1 hilo(s), repeticion 4
+[135/180] N=2000000 paralelo 1 hilo(s), repeticion 5
+[136/180] N=2000000 paralelo 1 hilo(s), repeticion 6
+[137/180] N=2000000 paralelo 1 hilo(s), repeticion 7
+[138/180] N=2000000 paralelo 1 hilo(s), repeticion 8
+[139/180] N=2000000 paralelo 1 hilo(s), repeticion 9
+[140/180] N=2000000 paralelo 1 hilo(s), repeticion 10
+[141/180] N=2000000 paralelo 2 hilo(s), repeticion 1
+[142/180] N=2000000 paralelo 2 hilo(s), repeticion 2
+[143/180] N=2000000 paralelo 2 hilo(s), repeticion 3
+[144/180] N=2000000 paralelo 2 hilo(s), repeticion 4
+[145/180] N=2000000 paralelo 2 hilo(s), repeticion 5
+[146/180] N=2000000 paralelo 2 hilo(s), repeticion 6
+[147/180] N=2000000 paralelo 2 hilo(s), repeticion 7
+[148/180] N=2000000 paralelo 2 hilo(s), repeticion 8
+[149/180] N=2000000 paralelo 2 hilo(s), repeticion 9
+[150/180] N=2000000 paralelo 2 hilo(s), repeticion 10
+[151/180] N=2000000 paralelo 4 hilo(s), repeticion 1
+[152/180] N=2000000 paralelo 4 hilo(s), repeticion 2
+[153/180] N=2000000 paralelo 4 hilo(s), repeticion 3
+[154/180] N=2000000 paralelo 4 hilo(s), repeticion 4
+[155/180] N=2000000 paralelo 4 hilo(s), repeticion 5
+[156/180] N=2000000 paralelo 4 hilo(s), repeticion 6
+[157/180] N=2000000 paralelo 4 hilo(s), repeticion 7
+[158/180] N=2000000 paralelo 4 hilo(s), repeticion 8
+[159/180] N=2000000 paralelo 4 hilo(s), repeticion 9
+[160/180] N=2000000 paralelo 4 hilo(s), repeticion 10
+[161/180] N=2000000 paralelo 8 hilo(s), repeticion 1
+[162/180] N=2000000 paralelo 8 hilo(s), repeticion 2
+[163/180] N=2000000 paralelo 8 hilo(s), repeticion 3
+[164/180] N=2000000 paralelo 8 hilo(s), repeticion 4
+[165/180] N=2000000 paralelo 8 hilo(s), repeticion 5
+[166/180] N=2000000 paralelo 8 hilo(s), repeticion 6
+[167/180] N=2000000 paralelo 8 hilo(s), repeticion 7
+[168/180] N=2000000 paralelo 8 hilo(s), repeticion 8
+[169/180] N=2000000 paralelo 8 hilo(s), repeticion 9
+[170/180] N=2000000 paralelo 8 hilo(s), repeticion 10
+[171/180] N=2000000 paralelo 12 hilo(s), repeticion 1
+[172/180] N=2000000 paralelo 12 hilo(s), repeticion 2
+[173/180] N=2000000 paralelo 12 hilo(s), repeticion 3
+[174/180] N=2000000 paralelo 12 hilo(s), repeticion 4
+[175/180] N=2000000 paralelo 12 hilo(s), repeticion 5
+[176/180] N=2000000 paralelo 12 hilo(s), repeticion 6
+[177/180] N=2000000 paralelo 12 hilo(s), repeticion 7
+[178/180] N=2000000 paralelo 12 hilo(s), repeticion 8
+[179/180] N=2000000 paralelo 12 hilo(s), repeticion 9
+[180/180] N=2000000 paralelo 12 hilo(s), repeticion 10
+
+Archivos generados en metricas/resultados/
+  mediciones_crudas.csv
+  resumen.csv
+  speedup_vs_hilos.png
+  eficiencia_vs_hilos.png
+  tiempo_cpu_vs_hilos.png
+  fps_vs_hilos.png
+  etapas_por_fotograma.png
+  generacion_vs_hilos.png
+  speedup_vs_n.png
+Ejecucion adicional con detalle por fotograma...
+  fps_por_fotograma.png
+
+      N    hilos   CPU sec (ms)   CPU par (ms)   speedup   eficiencia   FPS par
+  ----------------------------------------------------------------------------
+   100000      1          0.508          0.643      0.79x        79.0%     960.5
+   100000      2          0.508          0.432      1.18x        58.8%    1204.4
+   100000      4          0.508          0.374      1.36x        34.0%    1295.0
+   100000      8          0.508          0.361      1.41x        17.6%    1315.6
+   100000     12          0.508          0.405      1.25x        10.4%    1234.9
+   500000      1          2.994          3.634      0.82x        82.4%     200.8
+   500000      2          2.994          2.028      1.48x        73.8%     299.8
+   500000      4          2.994          1.385      2.16x        54.0%     371.1
+   500000      8          2.994          1.134      2.64x        33.0%     407.7
+   500000     12          2.994          1.190      2.52x        21.0%     393.0
+  2000000      1         12.234         14.958      0.82x        81.8%      43.2
+  2000000      2         12.234          8.417      1.45x        72.7%      76.3
+  2000000      4         12.234          5.983      2.04x        51.1%      98.7
+  2000000      8         12.234          4.476      2.73x        34.2%     116.7
+  2000000     12         12.234          4.484      2.73x        22.7%     116.9
