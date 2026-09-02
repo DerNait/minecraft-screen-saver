@@ -21,6 +21,7 @@ struct MobInstanceData {
     float x, y, z; // posicion de los pies en coordenadas del mundo
     float yaw;     // orientacion horizontal en radianes
     float bob;     // desplazamiento vertical del salto
+    float scale;   // 0..1: crece al aparecer y encoge al desaparecer
 };
 
 enum class MobModel {

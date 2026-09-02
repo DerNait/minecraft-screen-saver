@@ -93,6 +93,7 @@ layout(location = 5) in float aInstScale;  // escala de animacion 0..1
 
 uniform mat4 uViewProj;
 uniform mat4 uLightViewProj;
+uniform int  uInsetSideLayer;   // capa lateral cuyo bloque no es un cubo completo
 
 out vec2  vUV;
 flat out float vLayer;
@@ -103,17 +104,30 @@ out vec3 vWorldPos;
 out vec4 vLightSpacePosition;
 
 void main() {
-    // Escala alrededor del centro del bloque: al aparecer crece de 0 a 1 y al
-    // desarmarse encoge de 1 a 0.
-    vec3 worldPos = aPos * aInstScale + aInstPos;
-    gl_Position = uViewProj * vec4(worldPos, 1.0);
-    vWorldPos = worldPos;
-    vLightSpacePosition = uLightViewProj * vec4(worldPos, 1.0);
-
     // Desempaquetado de las tres capas del atlas.
     uint topLayer    =  aFaceTex        & 0xFFu;
     uint sideLayer   = (aFaceTex >> 8)  & 0xFFu;
     uint bottomLayer = (aFaceTex >> 16) & 0xFFu;
+
+    // El cactus no ocupa el cubo completo. En el modelo del juego original sus
+    // cuatro caras laterales estan metidas un pixel (1/16) hacia adentro y solo
+    // la cara superior y la inferior conservan el tamano del bloque. La textura
+    // lateral trae un borde transparente de un pixel a cada lado, de modo que la
+    // parte opaca de cada cara termina justo donde empieza la cara perpendicular
+    // y el contorno cierra. Sin este desplazamiento ese borde transparente deja
+    // un hueco visible en cada arista vertical.
+    vec3 localPos = aPos;
+    if (aFace >= 1.5 && int(sideLayer) == uInsetSideLayer) {
+        if (aFace < 2.5) localPos.x -= sign(aPos.x) * (1.0 / 16.0);
+        else             localPos.z -= sign(aPos.z) * (1.0 / 16.0);
+    }
+
+    // Escala alrededor del centro del bloque: al aparecer crece de 0 a 1 y al
+    // desarmarse encoge de 1 a 0.
+    vec3 worldPos = localPos * aInstScale + aInstPos;
+    gl_Position = uViewProj * vec4(worldPos, 1.0);
+    vWorldPos = worldPos;
+    vLightSpacePosition = uLightViewProj * vec4(worldPos, 1.0);
 
     if (aFace < 0.5)       vLayer = float(topLayer);
     else if (aFace < 1.5)  vLayer = float(bottomLayer);
@@ -315,6 +329,7 @@ bool CubeRenderer::init(std::string& error) {
     shadowStrengthLoc_  = glGetUniformLocation(program_, "uShadowStrength");
     shadowCenterLoc_    = glGetUniformLocation(program_, "uShadowCenter");
     shadowRadiusLoc_    = glGetUniformLocation(program_, "uShadowRadius");
+    insetSideLayerLoc_  = glGetUniformLocation(program_, "uInsetSideLayer");
 
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &cubeVbo_);
@@ -400,6 +415,7 @@ void CubeRenderer::draw(const InstanceData* instances, size_t count,
 
     glUseProgram(program_);
     glUniformMatrix4fv(viewProjLoc_, 1, GL_FALSE, glm::value_ptr(viewProj));
+    glUniform1i(insetSideLayerLoc_, insetSideLayer_);
     glUniform1i(dynamicLightingLoc_, lighting.dynamic ? 1 : 0);
     if (lighting.dynamic) {
         glUniform3fv(lightDirectionLoc_, 1, glm::value_ptr(lighting.direction));

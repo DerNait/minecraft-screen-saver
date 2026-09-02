@@ -67,8 +67,17 @@ conservan como referencia interna, pero no forman parte de la población activa.
 Los animales aparecen cuando termina la construcción del mundo. Cada uno puede
 esperar o caminar, elige su dirección mediante una secuencia pseudoaleatoria
 reproducible y evita bordes, desniveles mayores a un bloque, árboles y cactus.
-Se ocultan al comenzar el desarmado y se generan nuevamente con el siguiente
-mundo.
+
+Cada animal recorre cuatro fases de vida —`Appearing`, `Present`, `Vanishing` y
+`Gone`— con la misma idea que los bloques del terreno. No aparece ni desaparece
+de golpe: crece desde el suelo de escala 0 a 1 en 0.45 s y, cuando el terreno
+empieza a desarmarse, encoge hasta desvanecerse en 0.35 s. La escala se aplica en
+el vertex shader desde los pies del modelo, de modo que el animal parece brotar
+del terreno y hundirse en él. Cada uno lleva además un retraso propio —hasta
+0.9 s al llegar y 0.7 s al retirarse— para que la manada entera no se materialice
+ni se borre en el mismo instante. Mientras crece o encoge el animal no camina:
+solo cambia de tamaño. Los que ya se fueron dejan de generar instancia y no se
+envían a la GPU.
 
 Cada animal tiene cabeza, cuerpo y cuatro patas independientes. Como en los
 modelos de Minecraft, las cuatro patas pueden reutilizar la misma región de la
@@ -90,6 +99,34 @@ y [oveja](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/mode
 mediciones existentes del terreno no cambien. En esta primera tanda la IA se
 actualiza secuencialmente; el siguiente paso será separar percepción, propuesta
 y resolución para comparar su actualización secuencial y paralela.
+
+## Modelo del cactus
+
+El cactus es el único bloque del catálogo cuyo modelo **no es un cubo completo**.
+En el juego original sus cuatro caras laterales están metidas un píxel (1/16)
+hacia adentro y solo la cara superior y la inferior conservan el tamaño del
+bloque, tal como define
+[`block/cactus.json`](https://github.com/InventivetalentDev/minecraft-assets/blob/1.20.1/assets/minecraft/models/block/cactus.json):
+
+```json
+{ "from": [0, 0, 0],  "to": [16, 16, 16], "faces": { "down": ..., "up": ... } }
+{ "from": [0, 0, 1],  "to": [16, 16, 15], "faces": { "north": ..., "south": ... } }
+{ "from": [1, 0, 0],  "to": [15, 16, 16], "faces": { "west": ...,  "east": ... } }
+```
+
+Ese desplazamiento no es decorativo: las texturas `cactus_side`, `cactus_top` y
+`cactus_bottom` traen un borde transparente de un píxel, y el modelo está armado
+para que ese borde caiga exactamente donde empieza la cara perpendicular. La
+parte opaca de cada cara lateral termina en el mismo plano donde nace la cara
+vecina, y el contorno opaco de la cara superior coincide con las cuatro caras
+laterales ya desplazadas. Todo cierra.
+
+Dibujado como cubo completo, en cambio, ese borde transparente queda sobre la
+arista del bloque, el `discard` del fragment shader lo elimina y se ve un hueco
+vertical en cada esquina del cactus. Por eso `CubeRenderer::setInsetSideLayer()`
+recibe la capa del atlas de `cactus_side` y el vertex shader desplaza esas cuatro
+caras 1/16 hacia adentro. Es el único caso especial de geometría del
+renderizador; el resto de los bloques siguen siendo cubos completos.
 
 ## Iluminación y ciclo de día y noche
 

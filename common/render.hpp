@@ -98,6 +98,18 @@ public:
     void drawDepth(const InstanceData* instances, size_t count,
                    const glm::mat4& lightViewProj);
 
+    // ------------------------------------------------------------------------
+    //  setInsetSideLayer
+    //  Entradas: layer - capa del atlas de la textura lateral afectada, o -1
+    //  Descripcion: marca un tipo de bloque cuyo modelo NO es un cubo completo.
+    //  El cactus del juego original tiene sus cuatro caras laterales metidas un
+    //  pixel (1/16) hacia adentro, mientras que la cara superior y la inferior
+    //  conservan el tamano del bloque. Sus texturas traen un borde transparente
+    //  de un pixel que encaja exactamente con ese desplazamiento; dibujado como
+    //  cubo completo, ese borde deja un hueco visible en cada arista vertical.
+    // ------------------------------------------------------------------------
+    void setInsetSideLayer(int layer) { insetSideLayer_ = layer; }
+
     // Libera VAO, VBOs y el programa de shaders. Es seguro llamarla dos veces.
     void destroy();
 
@@ -126,6 +138,8 @@ private:
     GLint  shadowCenterLoc_    = -1;
     GLint  shadowRadiusLoc_    = -1;
     GLint  depthLightViewProjLoc_ = -1;
+    GLint  insetSideLayerLoc_ = -1;   // uniform de la capa con caras metidas
+    int    insetSideLayer_    = -1;   // -1 = todos los bloques son cubos completos
     size_t instanceCapacity_ = 0;  // capacidad reservada del buffer de instancias
     size_t lastUploadBytes_  = 0;
 };

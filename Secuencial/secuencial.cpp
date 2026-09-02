@@ -67,6 +67,10 @@ static const float kGravity        = 45.0f;  // aceleracion de caida (bloques/s^
 static const float kDropHeight     = 6.0f;   // altura desde la que cae cada bloque
 static const float kPopSeconds     = 0.12f;  // tiempo que tarda en crecer al aparecer
 static const float kShrinkSeconds  = 0.25f;  // tiempo que tarda en encogerse al desarmarse
+static const float kMobGrowSeconds   = 0.45f; // tiempo que tarda un mob en aparecer
+static const float kMobShrinkSeconds = 0.35f; // tiempo que tarda en desaparecer
+static const float kMobSpawnStagger  = 0.9f;  // desfase maximo entre apariciones
+static const float kMobDespawnStagger = 0.7f; // desfase maximo entre desapariciones
 static const float kNoiseFrequency = 0.035f; // escala horizontal de las colinas
 static const float kBaseHeight     = 9.0f;   // altura minima de una columna
 static const float kReliefAmplitud = 14.0f;  // amplitud maxima del relieve
@@ -433,15 +437,23 @@ static DayNightEnvironment calculateDayNight(const World& world,
 enum class MobAction : uint8_t { Waiting, Walking };
 enum class MobKind : uint8_t { Pig, Cow, Sheep };
 
+// Ciclo de vida visual del animal. Igual que los bloques del terreno, un mob no
+// aparece ni desaparece de golpe: crece desde el suelo al llegar y se encoge
+// hasta desvanecerse cuando el mundo empieza a desarmarse.
+enum class MobPhase : uint8_t { Appearing, Present, Vanishing, Gone };
+
 struct Mob {
     float x, y, z;          // x,z en coordenadas de la reticula; y en el render
     float yaw;              // direccion actual
     float speed;            // bloques por segundo
     float actionRemaining;  // tiempo antes de elegir otra accion
     float hopPhase;         // fase visual del paso/salto
+    float scale;            // 0..1: tamano actual dentro de su ciclo de vida
+    float phaseDelay;       // espera antes de crecer o de encoger, para escalonarlos
     uint32_t randomState;   // RNG propio para decisiones reproducibles
     MobAction action;
     MobKind kind;
+    MobPhase phase;
 };
 
 static uint32_t nextMobRandom(Mob& mob) {
@@ -518,6 +530,11 @@ static std::vector<Mob> spawnMobs(const World& world, int requested) {
             mob.actionRemaining = 0.25f + mobRandom01(mob) * 1.0f;
             mob.action = MobAction::Waiting;
             mob.kind = static_cast<MobKind>(i % 3);
+            // Nace invisible y con un pequeno retraso propio, para que la manada
+            // no brote de la tierra toda al mismo tiempo.
+            mob.phase = MobPhase::Appearing;
+            mob.scale = 0.0f;
+            mob.phaseDelay = mobRandom01(mob) * kMobSpawnStagger;
             mobs.push_back(mob);
             placed = true;
         }
@@ -543,6 +560,38 @@ static void chooseNextMobAction(Mob& mob) {
 // la comparacion de rendimiento mida unicamente el trabajo sobre los bloques.
 static void updateMobsSequential(std::vector<Mob>& mobs, const World& world, float dt) {
     for (Mob& mob : mobs) {
+        // --- Ciclo de vida visual -------------------------------------------
+        // Mientras crece o se encoge el animal no camina: solo cambia de tamano.
+        // Asi la aparicion y la desaparicion se leen como una transicion y no
+        // como un objeto que se materializa de golpe.
+        if (mob.phase == MobPhase::Gone) continue;
+
+        if (mob.phase == MobPhase::Appearing) {
+            if (mob.phaseDelay > 0.0f) {
+                mob.phaseDelay -= dt;
+                continue;
+            }
+            mob.scale += dt / kMobGrowSeconds;
+            if (mob.scale >= 1.0f) {
+                mob.scale = 1.0f;
+                mob.phase = MobPhase::Present;
+            }
+            continue;
+        }
+
+        if (mob.phase == MobPhase::Vanishing) {
+            if (mob.phaseDelay > 0.0f) {
+                mob.phaseDelay -= dt;
+                continue;
+            }
+            mob.scale -= dt / kMobShrinkSeconds;
+            if (mob.scale <= 0.0f) {
+                mob.scale = 0.0f;
+                mob.phase = MobPhase::Gone;
+            }
+            continue;
+        }
+
         mob.actionRemaining -= dt;
         if (mob.actionRemaining <= 0.0f) chooseNextMobAction(mob);
 
@@ -580,6 +629,38 @@ static void updateMobsSequential(std::vector<Mob>& mobs, const World& world, flo
     }
 }
 
+// ----------------------------------------------------------------------------
+//  beginMobDespawn
+//  Entradas/Salidas: mobs - poblacion activa
+//  Descripcion: pide a los animales que todavia estan presentes que empiecen a
+//  encogerse. Se llama cuando el mundo entra en la fase de desarmado. Los que
+//  aun no terminaban de aparecer encogen desde el tamano que alcanzaron, de modo
+//  que ninguno da un salto de escala.
+// ----------------------------------------------------------------------------
+static void beginMobDespawn(std::vector<Mob>& mobs) {
+    for (Mob& mob : mobs) {
+        if (mob.phase == MobPhase::Present || mob.phase == MobPhase::Appearing) {
+            mob.phase = MobPhase::Vanishing;
+            // Se reparte la retirada igual que la llegada: el desfase evita que
+            // la manada entera se encoja en el mismo instante.
+            mob.phaseDelay = mobRandom01(mob) * kMobDespawnStagger;
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+//  mobsStillVisible
+//  Retorno : true mientras quede algun animal con tamano mayor que cero
+//  Descripcion: permite que el bucle principal siga actualizando la poblacion
+//  durante el desarmado hasta que el ultimo animal termine de encogerse.
+// ----------------------------------------------------------------------------
+static bool mobsStillVisible(const std::vector<Mob>& mobs) {
+    for (const Mob& mob : mobs) {
+        if (mob.phase != MobPhase::Gone) return true;
+    }
+    return false;
+}
+
 static void buildMobInstances(const std::vector<Mob>& mobs, const World& world,
                               std::vector<MobInstanceData>& pigs,
                               std::vector<MobInstanceData>& cows,
@@ -593,6 +674,10 @@ static void buildMobInstances(const std::vector<Mob>& mobs, const World& world,
     sheep.reserve((mobs.size() + 2) / 3);
 
     for (const Mob& mob : mobs) {
+        // Los que ya se fueron, y los que todavia no empiezan a crecer, no
+        // generan instancia: no se envian a la GPU.
+        if (mob.phase == MobPhase::Gone || mob.scale <= 0.0f) continue;
+
         const float bob = mob.action == MobAction::Walking
                         ? std::max(0.0f, std::sin(mob.hopPhase)) * 0.10f
                         : 0.0f;
@@ -600,7 +685,7 @@ static void buildMobInstances(const std::vector<Mob>& mobs, const World& world,
         // desfase alinea su cabeza con la direccion en que avanza la IA.
         const MobInstanceData instance{
             mob.x - offset, mob.y, mob.z - offset,
-            mob.yaw - 1.57079633f, bob
+            mob.yaw - 1.57079633f, bob, mob.scale
         };
         if (mob.kind == MobKind::Pig) pigs.push_back(instance);
         else if (mob.kind == MobKind::Cow) cows.push_back(instance);
@@ -1296,6 +1381,12 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    // El cactus es el unico bloque cuyo modelo no es un cubo completo: sus caras
+    // laterales van metidas 1/16 hacia adentro, igual que en el juego original.
+    // Se le indica al renderizador cual es esa capa lateral del atlas.
+    renderer.setInsetSideLayer(static_cast<int>(
+        (faceTexTables[0][static_cast<int>(BlockId::Cactus)] >> 8) & 0xFFu));
+
     const bool dynamicLighting = cfg.lightingMode == "cycle";
     const bool shadowsEnabled = dynamicLighting && cfg.shadowMode == "near";
     SkyRenderer skyRenderer;
@@ -1511,14 +1602,18 @@ int main(int argc, char** argv) {
         updateWorld(world, elapsed, dt, liveBlocks);
         timing.updateMs = elapsedMsAndReset(etapa);
 
-        if (phase == Phase::Holding && cfg.mobCount > 0) {
-            if (!mobsSpawned) {
+        // Los animales siguen actualizandose despues de la fase sostenida: al
+        // empezar el desarmado encogen hasta desaparecer, y solo cuando el
+        // ultimo termina se dejan de enviar instancias a la GPU.
+        if (cfg.mobCount > 0 && (phase == Phase::Holding || mobsStillVisible(mobs))) {
+            if (phase == Phase::Holding && !mobsSpawned) {
                 mobs = spawnMobs(world, cfg.mobCount);
                 mobsSpawned = true;
                 std::printf("Mobs activos: %zu de %d solicitados\n",
                             mobs.size(), cfg.mobCount);
                 std::fflush(stdout);
             }
+            if (phase != Phase::Holding) beginMobDespawn(mobs);
             updateMobsSequential(mobs, world, dt);
             buildMobInstances(mobs, world, pigInstances, cowInstances, sheepInstances);
         } else {

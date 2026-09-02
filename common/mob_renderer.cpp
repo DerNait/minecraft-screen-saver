@@ -235,6 +235,7 @@ layout(location = 2) in vec3 aNormal;
 layout(location = 3) in vec3 aInstPos;
 layout(location = 4) in float aYaw;
 layout(location = 5) in float aBob;
+layout(location = 6) in float aScale;
 
 uniform mat4 uViewProj;
 uniform mat4 uLightViewProj;
@@ -248,9 +249,13 @@ out vec4 vLightSpacePosition;
 void main() {
     float c = cos(aYaw);
     float s = sin(aYaw);
-    vec3 local = vec3(c * aPos.x + s * aPos.z,
-                      aPos.y + aBob,
-                     -s * aPos.x + c * aPos.z);
+    // La escala se aplica antes de rotar y se mide desde los pies, porque el
+    // origen local del modelo esta al nivel del suelo: el animal crece hacia
+    // arriba al aparecer y se hunde encogiendose al desaparecer.
+    vec3 scaled = aPos * aScale;
+    vec3 local = vec3(c * scaled.x + s * scaled.z,
+                      scaled.y + aBob * aScale,
+                     -s * scaled.x + c * scaled.z);
     vec3 normal = normalize(vec3(c * aNormal.x + s * aNormal.z,
                                  aNormal.y,
                                 -s * aNormal.x + c * aNormal.z));
@@ -347,14 +352,16 @@ layout(location = 0) in vec3 aPos;
 layout(location = 3) in vec3 aInstPos;
 layout(location = 4) in float aYaw;
 layout(location = 5) in float aBob;
+layout(location = 6) in float aScale;
 uniform mat4 uLightViewProj;
 
 void main() {
     float c = cos(aYaw);
     float s = sin(aYaw);
-    vec3 local = vec3(c * aPos.x + s * aPos.z,
-                      aPos.y + aBob,
-                     -s * aPos.x + c * aPos.z);
+    vec3 scaled = aPos * aScale;
+    vec3 local = vec3(c * scaled.x + s * scaled.z,
+                      scaled.y + aBob * aScale,
+                     -s * scaled.x + c * scaled.z);
     gl_Position = uLightViewProj * vec4(local + aInstPos, 1.0);
 }
 )glsl";
@@ -414,6 +421,10 @@ bool MobRenderer::init(MobModel model, const std::string& texturePath, std::stri
                           reinterpret_cast<void*>(offsetof(MobInstanceData, bob)));
     glEnableVertexAttribArray(5);
     glVertexAttribDivisor(5, 1);
+    glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(MobInstanceData),
+                          reinterpret_cast<void*>(offsetof(MobInstanceData, scale)));
+    glEnableVertexAttribArray(6);
+    glVertexAttribDivisor(6, 1);
     glBindVertexArray(0);
 
     glGenTextures(1, &texture_);
