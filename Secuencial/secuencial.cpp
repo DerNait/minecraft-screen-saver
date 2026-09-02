@@ -7,28 +7,36 @@
 //  arriba, lo sostiene unos segundos, lo desarma de arriba hacia abajo y vuelve
 //  a empezar con un mundo nuevo.
 //
-//  ESTA VERSION EJECUTA TODO EN UN SOLO HILO. Su proposito es servir de linea
-//  base medible para la version paralela. Las tres funciones marcadas mas abajo
-//  como "PUNTO CALIENTE" son las que concentran el trabajo proporcional a N y
-//  son, por lo tanto, las candidatas a paralelizar con OpenMP:
+//  ESTA VERSION EJECUTA TODO EN UN SOLO HILO. No contiene ni una directiva de
+//  OpenMP. Produce exactamente la misma imagen y las mismas opciones que la
+//  version paralela (camara automatica, mobs, ciclo de dia y noche y sombras),
+//  de modo que la unica diferencia medible entre ambas sea el reparto del
+//  trabajo entre hilos. Sirve como linea base para el calculo de speedup.
 //
-//    1. generateVoxels()        - O(N)  una vez por mundo
-//    2. updateWorld()           - O(N)  en cada fotograma
-//    3. buildInstanceBuffer()   - O(N)  en cada fotograma
+//  Las funciones cuyo costo crece con N, y que la version paralela reparte con
+//  OpenMP, aqui las recorre secuencialmente un unico hilo:
+//
+//    1. generateVoxels()        - mapa de alturas, estratos y vegetacion
+//    2. buildBlockList()        - compactacion de la reticula a lista
+//    3. updateWorld()           - fisica y maquina de estados de cada bloque
+//    4. buildInstanceBuffer()   - descarte de invisibles y empaquetado
+//    5. buildNearbyShadowInstances() - casters locales para el shadow map
+//
+//  La IA de los mobs tambien es secuencial, igual que en la version paralela.
 //
 //  Elemento de fisica/trigonometria requerido por el enunciado:
 //    - Cada bloque cae con aceleracion constante (integracion de Euler de la
 //      gravedad) hasta asentarse en su posicion final.
-//    - La camara orbita el mundo describiendo una circunferencia mediante
-//      funciones trigonometricas (seno y coseno).
+//    - La camara puede orbitar el mundo o alternar entre encuadres exteriores e
+//      interiores; los recorridos usan funciones trigonometricas (seno y coseno).
 // ============================================================================
 
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <omp.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -39,8 +47,11 @@
 
 #include "app_config.hpp"
 #include "block_catalog.hpp"
+#include "mob_renderer.hpp"
 #include "noise.hpp"
 #include "render.hpp"
+#include "shadow_map.hpp"
+#include "sky_renderer.hpp"
 #include "texture_atlas.hpp"
 
 using namespace mcss;
@@ -120,6 +131,481 @@ struct World {
 
 // Fases del ciclo del protector de pantalla.
 enum class Phase { Building, Holding, Dissolving, Paused };
+
+// ============================================================================
+//  CAMARA
+// ============================================================================
+
+// Un encuadre completo. Ademas de la posicion y el punto observado se conserva
+// el vector vertical porque la toma cenital necesita una orientacion distinta.
+struct CameraView {
+    glm::vec3   eye;
+    glm::vec3   target;
+    glm::vec3   up;
+    float       fovDegrees;
+    int         shot;
+    const char* name;
+};
+
+static const int kCameraShotCount = 6;
+static const char* const kCameraShotNames[kCameraShotCount] = {
+    "orbita exterior",
+    "mirador interior",
+    "panoramica interior",
+    "orbita interior",
+    "diagonal elevada",
+    "vista cenital"
+};
+
+// Secuencia activa del modo automatico. El mirador interior fijo (toma 1) se
+// conserva implementado en makeCameraShot(), pero queda fuera de la rotacion
+// para poder reactivarlo en el futuro agregando nuevamente el 1 a esta lista.
+static const int kAutoCameraShots[] = { 0, 2, 3, 4, 5 };
+static const int kAutoCameraShotCount =
+    static_cast<int>(sizeof(kAutoCameraShots) / sizeof(kAutoCameraShots[0]));
+
+// Devuelve la altura de la superficie bajo una posicion expresada en las
+// coordenadas centradas que usa el renderizador. Se interpola entre las cuatro
+// columnas vecinas: elegir una sola columna con redondeo produciria un salto
+// vertical cada vez que una camara movil cruza el limite entre dos bloques.
+static float terrainTopAt(const World& world, float worldX, float worldZ) {
+    if (world.heightMap.empty() || world.side <= 0) return 1.0f;
+
+    const float offset = world.side * 0.5f - 0.5f;
+    float gridX = std::max(0.0f, std::min(static_cast<float>(world.side - 1),
+                                         worldX + offset));
+    float gridZ = std::max(0.0f, std::min(static_cast<float>(world.side - 1),
+                                         worldZ + offset));
+
+    const int x0 = static_cast<int>(std::floor(gridX));
+    const int z0 = static_cast<int>(std::floor(gridZ));
+    const int x1 = std::min(x0 + 1, world.side - 1);
+    const int z1 = std::min(z0 + 1, world.side - 1);
+    const float tx = gridX - static_cast<float>(x0);
+    const float tz = gridZ - static_cast<float>(z0);
+
+    const auto heightAt = [&world](int x, int z) {
+        return static_cast<float>(
+            world.heightMap[static_cast<size_t>(z) * world.side + x]);
+    };
+
+    const float nearHeight = heightAt(x0, z0) * (1.0f - tx) + heightAt(x1, z0) * tx;
+    const float farHeight  = heightAt(x0, z1) * (1.0f - tx) + heightAt(x1, z1) * tx;
+    return nearHeight * (1.0f - tz) + farHeight * tz + 0.5f;
+}
+
+// Construye uno de los encuadres de la secuencia automatica. Todos escalan con
+// las dimensiones del mundo, de modo que funcionan igual para distintos N.
+static CameraView makeCameraShot(const World& world, int shot, double now) {
+    const float side = static_cast<float>(world.side);
+    const float time = static_cast<float>(now);
+    const float centerSurface = terrainTopAt(world, 0.0f, 0.0f);
+    const glm::vec3 center(0.0f, centerSurface + 2.0f, 0.0f);
+    // Las tomas interiores moviles mantienen esta altura durante todo el mundo.
+    // No siguen el relieve local, por lo que su movimiento vertical es nulo.
+    const float interiorEyeY = static_cast<float>(world.height) - 2.0f;
+
+    CameraView view{};
+    view.shot = shot;
+    view.name = kCameraShotNames[shot];
+    view.up = glm::vec3(0.0f, 1.0f, 0.0f);
+
+    switch (shot) {
+        case 0: { // Orbita exterior original.
+            const float radius = side * 1.05f + 14.0f;
+            const float height = world.height * 0.85f + side * 0.30f;
+            const float angle = time * 0.15f;
+            view.eye = glm::vec3(std::cos(angle) * radius,
+                                 height,
+                                 std::sin(angle) * radius);
+            view.target = glm::vec3(0.0f, world.height * 0.30f, 0.0f);
+            view.fovDegrees = 55.0f;
+            break;
+        }
+
+        case 1: { // Mirador fijo desactivado de la secuencia automatica.
+            const float x = -side * 0.22f;
+            const float z = -side * 0.18f;
+            const float tx = side * 0.18f;
+            const float tz = side * 0.16f;
+            view.eye = glm::vec3(x, terrainTopAt(world, x, z) + 8.5f, z);
+            view.target = glm::vec3(tx, terrainTopAt(world, tx, tz) + 2.0f, tz);
+            view.fovDegrees = 62.0f;
+            break;
+        }
+
+        case 2: { // Posicion interior fija que gira lentamente.
+            const float x = side * 0.08f;
+            const float z = -side * 0.10f;
+            const float angle = time * 0.18f;
+            const float lookDistance = side * 0.34f;
+            const float tx = x + std::cos(angle) * lookDistance;
+            const float tz = z + std::sin(angle) * lookDistance;
+            view.eye = glm::vec3(x, interiorEyeY, z);
+            view.target = glm::vec3(tx, center.y, tz);
+            view.fovDegrees = 66.0f;
+            break;
+        }
+
+        case 3: { // Orbita baja que recorre el interior del mundo.
+            const float angle = time * 0.11f;
+            const float radius = side * 0.31f;
+            const float x = std::cos(angle) * radius;
+            const float z = std::sin(angle) * radius;
+            view.eye = glm::vec3(x, interiorEyeY + 1.0f, z);
+            view.target = center;
+            view.fovDegrees = 60.0f;
+            break;
+        }
+
+        case 4: { // Vista exterior elevada desde una esquina.
+            const float drift = std::sin(time * 0.08f) * side * 0.08f;
+            view.eye = glm::vec3(side * 0.62f + drift,
+                                 world.height * 0.95f + side * 0.38f,
+                                -side * 0.62f + drift);
+            view.target = center;
+            view.fovDegrees = 52.0f;
+            break;
+        }
+
+        default: { // Vista cenital con un desplazamiento circular pequeno.
+            const float angle = time * 0.07f;
+            const float radius = side * 0.12f;
+            view.eye = glm::vec3(std::cos(angle) * radius,
+                                 world.height + side * 0.90f + 12.0f,
+                                 std::sin(angle) * radius);
+            view.target = center;
+            view.up = glm::vec3(0.0f, 0.0f, -1.0f);
+            view.fovDegrees = 50.0f;
+            break;
+        }
+    }
+
+    return view;
+}
+
+// Selecciona la toma activa y suaviza el cambio desde la anterior. Durante la
+// interpolacion se agrega un arco vertical que evita atravesar el terreno.
+static CameraView calculateCamera(const World& world, const AppConfig& cfg, double now) {
+    if (cfg.cameraMode != "auto") return makeCameraShot(world, 0, now);
+
+    const double interval = static_cast<double>(cfg.cameraChangeSeconds);
+    const long long slot = static_cast<long long>(std::floor(now / interval));
+    const int playlistIndex = static_cast<int>(slot % kAutoCameraShotCount);
+    const int shot = kAutoCameraShots[playlistIndex];
+    CameraView current = makeCameraShot(world, shot, now);
+
+    const double inSlot = now - static_cast<double>(slot) * interval;
+    const float transitionSeconds = std::min(1.5f, cfg.cameraChangeSeconds * 0.25f);
+    if (slot <= 0 || inSlot >= transitionSeconds) return current;
+
+    const int previousPlaylistIndex =
+        static_cast<int>((slot - 1) % kAutoCameraShotCount);
+    const int previousShot = kAutoCameraShots[previousPlaylistIndex];
+    const CameraView previous = makeCameraShot(world, previousShot, now);
+    float t = static_cast<float>(inSlot / transitionSeconds);
+    t = t * t * (3.0f - 2.0f * t); // smoothstep
+
+    current.eye = previous.eye * (1.0f - t) + current.eye * t;
+    current.eye.y += std::sin(t * 3.14159265f) * std::max(4.0f, world.side * 0.06f);
+    current.target = previous.target * (1.0f - t) + current.target * t;
+    current.up = glm::normalize(previous.up * (1.0f - t) + current.up * t);
+    current.fovDegrees = previous.fovDegrees * (1.0f - t) + current.fovDegrees * t;
+    return current;
+}
+
+// ============================================================================
+//  ILUMINACION Y CICLO DE DIA/NOCHE
+// ============================================================================
+
+struct DayNightEnvironment {
+    SceneLighting lighting;
+    SkyEnvironment sky;
+    const char* phaseName;
+};
+
+static float smoothRange(float edge0, float edge1, float value) {
+    float t = std::max(0.0f, std::min(1.0f, (value - edge0) / (edge1 - edge0)));
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static glm::vec3 rgbColor(uint32_t color) {
+    return glm::vec3(((color >> 16) & 0xFF) / 255.0f,
+                     ((color >> 8)  & 0xFF) / 255.0f,
+                     ( color        & 0xFF) / 255.0f);
+}
+
+// El ciclo comienza al mediodia para que el mundo sea visible desde el primer
+// fotograma. El arco diurno ocupa 70% del tiempo total y el nocturno 30%; ambos
+// conservan continuidad en el horizonte aunque avancen a velocidades distintas.
+static DayNightEnvironment calculateDayNight(const World& world,
+                                              const AppConfig& cfg,
+                                              double now,
+                                              const glm::vec3& cameraPosition) {
+    constexpr float kTwoPi = 6.28318530f;
+    constexpr float kPi = 3.14159265f;
+    constexpr float kDayFraction = 0.70f;
+    constexpr float kNightFraction = 1.0f - kDayFraction;
+    constexpr float kHalfDay = kDayFraction * 0.5f;
+    const float cycle = static_cast<float>(
+        std::fmod(now / static_cast<double>(cfg.dayCycleSeconds), 1.0));
+    float angle = 0.0f;
+    if (cycle < kHalfDay) {
+        // Mediodia -> atardecer: primer 35% del ciclo.
+        angle = kPi * 0.5f + (cycle / kHalfDay) * kPi * 0.5f;
+    } else if (cycle < kHalfDay + kNightFraction) {
+        // Atardecer -> amanecer: la noche completa ocupa 30%.
+        const float nightProgress =
+            (cycle - kHalfDay) / kNightFraction;
+        angle = kPi + nightProgress * kPi;
+    } else {
+        // Amanecer -> mediodia: ultimo 35%, cerrando el ciclo sin salto.
+        const float morningProgress =
+            (cycle - kHalfDay - kNightFraction) / kHalfDay;
+        angle = kTwoPi + morningProgress * kPi * 0.5f;
+    }
+    const glm::vec3 sunDirection = glm::normalize(
+        glm::vec3(std::cos(angle), std::sin(angle), 0.32f));
+
+    const float daylight = smoothRange(-0.16f, 0.14f, sunDirection.y);
+    const float night = 1.0f - smoothRange(-0.20f, 0.08f, sunDirection.y);
+    const float sunsetStrength =
+        (1.0f - smoothRange(0.02f, 0.38f, std::abs(sunDirection.y))) *
+        (0.35f + daylight * 0.65f);
+
+    const glm::vec3 biomeSky = rgbColor(world.biome->skyColor);
+    const glm::vec3 dayZenith = glm::mix(biomeSky,
+                                         glm::vec3(0.18f, 0.48f, 0.92f), 0.40f);
+    const glm::vec3 dayHorizon = glm::mix(biomeSky,
+                                          glm::vec3(0.90f, 0.95f, 1.0f), 0.50f);
+    const glm::vec3 nightZenith(0.006f, 0.010f, 0.050f);
+    const glm::vec3 nightHorizon(0.025f, 0.045f, 0.115f);
+
+    DayNightEnvironment environment{};
+    environment.sky.zenithColor = glm::mix(nightZenith, dayZenith, daylight);
+    environment.sky.horizonColor = glm::mix(nightHorizon, dayHorizon, daylight);
+    environment.sky.sunDirection = sunDirection;
+    environment.sky.sunColor = glm::mix(glm::vec3(1.0f, 0.42f, 0.16f),
+                                        glm::vec3(1.0f, 0.94f, 0.74f),
+                                        smoothRange(0.02f, 0.48f, sunDirection.y));
+    environment.sky.moonColor = glm::vec3(0.72f, 0.82f, 1.0f);
+    environment.sky.sunsetColor = glm::vec3(1.0f, 0.20f, 0.035f);
+    environment.sky.daylight = daylight;
+    environment.sky.starVisibility = night;
+    environment.sky.sunsetStrength = sunsetStrength;
+    environment.sky.timeSeconds = static_cast<float>(now);
+
+    environment.lighting.dynamic = true;
+    environment.lighting.direction =
+        sunDirection.y > -0.12f ? sunDirection : -sunDirection;
+    environment.lighting.ambientColor = glm::mix(
+        glm::vec3(0.14f, 0.16f, 0.23f),
+        glm::vec3(0.42f, 0.43f, 0.43f), daylight);
+    environment.lighting.ambientColor +=
+        glm::vec3(0.10f, 0.055f, 0.025f) * sunsetStrength;
+    const glm::vec3 daylightColor = glm::mix(
+        glm::vec3(1.0f, 0.40f, 0.16f),
+        glm::vec3(0.72f, 0.70f, 0.66f),
+        smoothRange(0.02f, 0.45f, sunDirection.y));
+    environment.lighting.diffuseColor = glm::mix(
+        glm::vec3(0.20f, 0.23f, 0.34f), daylightColor, daylight);
+    environment.lighting.fogColor = environment.sky.horizonColor +
+        environment.sky.sunsetColor * sunsetStrength * 0.18f;
+    environment.lighting.cameraPosition = cameraPosition;
+    environment.lighting.fogDensity =
+        1.0f / std::max(85.0f, static_cast<float>(world.side) * 2.2f);
+
+    if (sunDirection.y > 0.22f) {
+        environment.phaseName = "dia";
+    } else if (sunDirection.y > -0.16f) {
+        environment.phaseName = std::cos(angle) < 0.0f ? "atardecer" : "amanecer";
+    } else {
+        environment.phaseName = "noche";
+    }
+    return environment;
+}
+
+// ============================================================================
+//  MOBS - PRIMERA TANDA: IA SECUENCIAL
+// ============================================================================
+
+enum class MobAction : uint8_t { Waiting, Walking };
+enum class MobKind : uint8_t { Pig, Cow, Sheep };
+
+struct Mob {
+    float x, y, z;          // x,z en coordenadas de la reticula; y en el render
+    float yaw;              // direccion actual
+    float speed;            // bloques por segundo
+    float actionRemaining;  // tiempo antes de elegir otra accion
+    float hopPhase;         // fase visual del paso/salto
+    uint32_t randomState;   // RNG propio para decisiones reproducibles
+    MobAction action;
+    MobKind kind;
+};
+
+static uint32_t nextMobRandom(Mob& mob) {
+    mob.randomState = hashUint(mob.randomState + 0x9E3779B9u);
+    return mob.randomState;
+}
+
+static float mobRandom01(Mob& mob) {
+    return hashToUnitFloat(nextMobRandom(mob));
+}
+
+// Altura continua para que el mob suba desniveles de un bloque sin saltos
+// visuales. Las decisiones de colision siguen usando celdas enteras.
+static float mobSurfaceAt(const World& world, float gridX, float gridZ) {
+    gridX = std::max(0.0f, std::min(static_cast<float>(world.side - 1), gridX));
+    gridZ = std::max(0.0f, std::min(static_cast<float>(world.side - 1), gridZ));
+    const int x0 = static_cast<int>(std::floor(gridX));
+    const int z0 = static_cast<int>(std::floor(gridZ));
+    const int x1 = std::min(x0 + 1, world.side - 1);
+    const int z1 = std::min(z0 + 1, world.side - 1);
+    const float tx = gridX - x0;
+    const float tz = gridZ - z0;
+    const auto h = [&world](int x, int z) {
+        return static_cast<float>(
+            world.heightMap[static_cast<size_t>(z) * world.side + x]);
+    };
+    const float h0 = h(x0, z0) * (1.0f - tx) + h(x1, z0) * tx;
+    const float h1 = h(x0, z1) * (1.0f - tx) + h(x1, z1) * tx;
+    return h0 * (1.0f - tz) + h1 * tz;
+}
+
+static bool mobCellIsClear(const World& world, int gx, int gz) {
+    if (gx < 2 || gx >= world.side - 2 || gz < 2 || gz >= world.side - 2) {
+        return false;
+    }
+    const int surface = world.heightMap[static_cast<size_t>(gz) * world.side + gx];
+    if (surface + 2 >= world.height) return false;
+    return !world.occupiedAt(gx, surface + 1, gz) &&
+           !world.occupiedAt(gx, surface + 2, gz);
+}
+
+// Se ejecuta cuando inicia Holding, momento en que occupancy ya representa el
+// terreno armado. Esto permite evitar arboles y cactus al elegir posiciones.
+static std::vector<Mob> spawnMobs(const World& world, int requested) {
+    std::vector<Mob> mobs;
+    if (requested <= 0 || world.side < 6) return mobs;
+
+    mobs.reserve(static_cast<size_t>(requested));
+    std::vector<uint8_t> taken(static_cast<size_t>(world.side) * world.side, 0);
+    uint32_t randomState = hashUint(world.seed ^ 0x4D4F4253u); // "MOBS"
+    const int usableSide = world.side - 4;
+
+    for (int i = 0; i < requested; ++i) {
+        bool placed = false;
+        for (int attempt = 0; attempt < 64 && !placed; ++attempt) {
+            randomState = hashUint(randomState + 0x9E3779B9u);
+            const int gx = 2 + static_cast<int>(randomState %
+                                                static_cast<uint32_t>(usableSide));
+            randomState = hashUint(randomState + 0x9E3779B9u);
+            const int gz = 2 + static_cast<int>(randomState %
+                                                static_cast<uint32_t>(usableSide));
+            const size_t cell = static_cast<size_t>(gz) * world.side + gx;
+            if (taken[cell] || !mobCellIsClear(world, gx, gz)) continue;
+
+            taken[cell] = 1;
+            Mob mob{};
+            mob.x = static_cast<float>(gx);
+            mob.z = static_cast<float>(gz);
+            mob.y = static_cast<float>(
+                world.heightMap[static_cast<size_t>(gz) * world.side + gx]) + 0.5f;
+            mob.randomState = hashUint(randomState ^ static_cast<uint32_t>(i));
+            mob.yaw = mobRandom01(mob) * 6.28318530f;
+            mob.speed = 0.8f + mobRandom01(mob) * 0.6f;
+            mob.actionRemaining = 0.25f + mobRandom01(mob) * 1.0f;
+            mob.action = MobAction::Waiting;
+            mob.kind = static_cast<MobKind>(i % 3);
+            mobs.push_back(mob);
+            placed = true;
+        }
+        if (!placed) break; // el mundo ya no tiene mas columnas libres
+    }
+    return mobs;
+}
+
+static void chooseNextMobAction(Mob& mob) {
+    if (mobRandom01(mob) < 0.28f) {
+        mob.action = MobAction::Waiting;
+        mob.actionRemaining = 0.5f + mobRandom01(mob) * 1.5f;
+        return;
+    }
+
+    mob.action = MobAction::Walking;
+    mob.yaw = mobRandom01(mob) * 6.28318530f;
+    mob.speed = 0.8f + mobRandom01(mob) * 0.7f;
+    mob.actionRemaining = 1.2f + mobRandom01(mob) * 2.8f;
+}
+
+// La IA de los mobs es secuencial en ambas versiones del programa, de modo que
+// la comparacion de rendimiento mida unicamente el trabajo sobre los bloques.
+static void updateMobsSequential(std::vector<Mob>& mobs, const World& world, float dt) {
+    for (Mob& mob : mobs) {
+        mob.actionRemaining -= dt;
+        if (mob.actionRemaining <= 0.0f) chooseNextMobAction(mob);
+
+        if (mob.action == MobAction::Walking) {
+            const float nextX = mob.x + std::cos(mob.yaw) * mob.speed * dt;
+            const float nextZ = mob.z + std::sin(mob.yaw) * mob.speed * dt;
+            const int gx = static_cast<int>(std::lround(nextX));
+            const int gz = static_cast<int>(std::lround(nextZ));
+            bool clear = mobCellIsClear(world, gx, gz);
+
+            if (clear) {
+                const int oldX = static_cast<int>(std::lround(mob.x));
+                const int oldZ = static_cast<int>(std::lround(mob.z));
+                const int oldSurface = world.heightMap[
+                    static_cast<size_t>(oldZ) * world.side + oldX];
+                const int newSurface = world.heightMap[
+                    static_cast<size_t>(gz) * world.side + gx];
+                clear = std::abs(newSurface - oldSurface) <= 1;
+            }
+
+            if (clear) {
+                mob.x = nextX;
+                mob.z = nextZ;
+                mob.hopPhase += dt * (7.0f + mob.speed * 2.0f);
+            } else {
+                // Giro determinista al encontrar un borde, arbol o desnivel.
+                const float side = mobRandom01(mob) < 0.5f ? -1.0f : 1.0f;
+                mob.yaw += side * (1.2f + mobRandom01(mob) * 1.2f);
+                mob.actionRemaining = 0.35f + mobRandom01(mob) * 0.45f;
+            }
+        }
+
+        const float targetY = mobSurfaceAt(world, mob.x, mob.z) + 0.5f;
+        mob.y += (targetY - mob.y) * std::min(1.0f, dt * 8.0f);
+    }
+}
+
+static void buildMobInstances(const std::vector<Mob>& mobs, const World& world,
+                              std::vector<MobInstanceData>& pigs,
+                              std::vector<MobInstanceData>& cows,
+                              std::vector<MobInstanceData>& sheep) {
+    const float offset = world.side * 0.5f - 0.5f;
+    pigs.clear();
+    cows.clear();
+    sheep.clear();
+    pigs.reserve((mobs.size() + 2) / 3);
+    cows.reserve((mobs.size() + 2) / 3);
+    sheep.reserve((mobs.size() + 2) / 3);
+
+    for (const Mob& mob : mobs) {
+        const float bob = mob.action == MobAction::Walking
+                        ? std::max(0.0f, std::sin(mob.hopPhase)) * 0.10f
+                        : 0.0f;
+        // Los modelos cuadrupedos miran hacia -Z en su espacio local. Este
+        // desfase alinea su cabeza con la direccion en que avanza la IA.
+        const MobInstanceData instance{
+            mob.x - offset, mob.y, mob.z - offset,
+            mob.yaw - 1.57079633f, bob
+        };
+        if (mob.kind == MobKind::Pig) pigs.push_back(instance);
+        else if (mob.kind == MobKind::Cow) cows.push_back(instance);
+        else sheep.push_back(instance);
+    }
+}
 
 // ============================================================================
 //  GENERACION DEL TERRENO
@@ -219,10 +705,11 @@ static BlockId chooseStratum(int y, int surface, int gx, int gz,
 //  plantVegetation
 //  Entradas: voxels  - reticula del mundo que se esta llenando
 //            world   - dimensiones y bioma del mundo
-//            relief  - multiplicador de relieve
 //  Descripcion: coloca arboles (o cactus en el desierto) sobre las columnas
-//  elegidas pseudoaleatoriamente. Escribe directamente sobre la reticula, y
-//  respeta un margen en los bordes para que las copas no queden cortadas.
+//  elegidas pseudoaleatoriamente. Un unico hilo recorre el terreno completo en
+//  orden, de modo que un arbol puede escribir su copa sobre columnas vecinas
+//  sin coordinarse con nadie. Se respeta un margen en los bordes para que las
+//  copas no queden cortadas.
 // ----------------------------------------------------------------------------
 static void plantVegetation(std::vector<BlockId>& voxels, const World& world) {
     const Biome& biome = *world.biome;
@@ -235,7 +722,7 @@ static void plantVegetation(std::vector<BlockId>& voxels, const World& world) {
 
             int base = world.heightMap[static_cast<size_t>(gz) * world.side + gx];
 
-            // El cactus del desierto es una simple columna de 2 a 4 bloques.
+            // El cactus del desierto solo ocupa su propia columna.
             if (biome.logType == BlockId::Cactus) {
                 int tall = 2 + static_cast<int>(hashUint(h) % 3u);
                 for (int k = 1; k <= tall; ++k) {
@@ -263,10 +750,12 @@ static void plantVegetation(std::vector<BlockId>& voxels, const World& world) {
                 int radius = (level <= -1) ? 2 : 1;
 
                 for (int dz = -radius; dz <= radius; ++dz) {
-                    for (int dx = -radius; dx <= radius; ++dx) {
-                        if (dx == 0 && dz == 0 && level < 1) continue;  // no tapar el tronco
+                    int nz = gz + dz;
+                    if (nz < 0 || nz >= world.side) continue;
 
-                        // Recorte pseudoaleatorio de las esquinas de la copa.
+                    for (int dx = -radius; dx <= radius; ++dx) {
+                        if (dx == 0 && dz == 0 && level < 1) continue;
+
                         if (std::abs(dx) == radius && std::abs(dz) == radius) {
                             uint32_t cornerHash = hashCoords(gx + dx, gz + dz,
                                                              world.seed ^ 0xC0FFEEu);
@@ -274,8 +763,7 @@ static void plantVegetation(std::vector<BlockId>& voxels, const World& world) {
                         }
 
                         int nx = gx + dx;
-                        int nz = gz + dz;
-                        if (nx < 0 || nx >= world.side || nz < 0 || nz >= world.side) continue;
+                        if (nx < 0 || nx >= world.side) continue;
 
                         size_t idx = world.index(nx, y, nz);
                         if (voxels[idx] == BlockId::Air) voxels[idx] = biome.leafType;
@@ -292,9 +780,8 @@ static void plantVegetation(std::vector<BlockId>& voxels, const World& world) {
 //            relief - multiplicador de relieve
 //  Salidas : world.heightMap y el arreglo de voxeles devuelto
 //  Descripcion: recorre las side*side columnas y decide el tipo de cada celda.
-//  En la version paralela este es el bucle que se reparte entre hilos, tal como
-//  describe el pipeline: el terreno se divide segun la cantidad de hilos y cada
-//  hilo llena su porcion a partir de la misma semilla compartida.
+//  Un solo hilo las visita todas en orden. La version paralela reparte este
+//  mismo bucle entre hilos dividiendo el terreno en regiones.
 // ----------------------------------------------------------------------------
 static std::vector<BlockId> generateVoxels(World& world, float relief) {
     const Biome& biome = *world.biome;
@@ -341,7 +828,8 @@ static std::vector<BlockId> generateVoxels(World& world, float relief) {
 //  anima y se dibuja. El recorrido es Y-mayor, asi que la lista queda ordenada
 //  por capas de abajo hacia arriba, que es el orden de construccion. A cada
 //  bloque se le asigna el instante en que aparece y el instante en que se
-//  desvanece, ambos derivados de su capa.
+//  desvanece, ambos derivados de su capa. La version paralela obtiene esta
+//  misma lista, en el mismo orden, mediante una suma de prefijos.
 // ----------------------------------------------------------------------------
 static void buildBlockList(const std::vector<BlockId>& voxels, World& world,
                            const AppConfig& cfg) {
@@ -358,8 +846,9 @@ static void buildBlockList(const std::vector<BlockId>& voxels, World& world,
     const float layers = static_cast<float>(world.height);
     const float dissolveStart = cfg.buildSeconds + cfg.holdSeconds;
 
+    // El recorrido es Y-mayor, asi que la lista queda ordenada por capas de
+    // abajo hacia arriba, que es exactamente el orden de construccion.
     for (int y = 0; y < world.height; ++y) {
-        // Fraccion vertical de esta capa dentro del mundo: 0 abajo, 1 arriba.
         float layerFraction = static_cast<float>(y) / layers;
 
         for (int gz = 0; gz < world.side; ++gz) {
@@ -413,8 +902,10 @@ static double generateWorld(const AppConfig& cfg, uint32_t seed, World& world) {
     auto t0 = std::chrono::steady_clock::now();
 
     world.seed = seed;
+    // La interfaz acepta cualquier indice no negativo; se normaliza antes de
+    // usarlo tanto en el catalogo como en la tabla de texturas.
     world.biomeIndex = (cfg.biomeIndex >= 0)
-                     ? cfg.biomeIndex
+                     ? cfg.biomeIndex % kBiomeCount
                      : static_cast<int>(hashUint(seed) % static_cast<uint32_t>(kBiomeCount));
     world.biome = &biomeAt(world.biomeIndex);
 
@@ -448,7 +939,7 @@ static double generateWorld(const AppConfig& cfg, uint32_t seed, World& world) {
 //
 //  Nota para la version paralela: dos bloques distintos nunca escriben la misma
 //  celda de occupancy, por lo que el bucle se puede repartir entre hilos, pero
-//  hace falta una barrera antes de leer occupancy en buildInstanceBuffer.
+//  hace falta una barrera antes de que buildInstanceBuffer lea esa reticula.
 // ----------------------------------------------------------------------------
 static void updateWorld(World& world, float elapsed, float dt, size_t& liveBlocks) {
     size_t alive = 0;
@@ -524,42 +1015,110 @@ static void updateWorld(World& world, float elapsed, float dt, size_t& liveBlock
 //  de sus seis caras es observable. Este descarte es lo que mantiene los FPS
 //  altos cuando N crece: en un mundo armado solo se dibuja su cascara.
 //
-//  Nota para la version paralela: escribir en "instances" es una compactacion
-//  (cada hilo produce una cantidad distinta de elementos), asi que requerira
-//  un conteo por hilo y una suma de prefijos, o bien un contador atomico.
+//  Escribir en "instances" es una compactacion: la cantidad de salida no se
+//  conoce de antemano. Con un solo hilo basta un contador que avanza. La
+//  version paralela necesita ademas conteos locales y una suma de prefijos.
 // ----------------------------------------------------------------------------
+static bool blockIsVisible(const World& world, const Block& b) {
+    if (b.state == BlockState::Gone || b.scale <= 0.0f) return false;
+
+    // Los bloques que aun caen se ven desde cualquier lado. Solo los asentados
+    // pueden descartarse por estar completamente rodeados.
+    if (b.state == BlockState::Placed &&
+        world.occupiedAt(b.gx + 1, b.gy, b.gz) &&
+        world.occupiedAt(b.gx - 1, b.gy, b.gz) &&
+        world.occupiedAt(b.gx, b.gy + 1, b.gz) &&
+        world.occupiedAt(b.gx, b.gy - 1, b.gz) &&
+        world.occupiedAt(b.gx, b.gy, b.gz + 1) &&
+        world.occupiedAt(b.gx, b.gy, b.gz - 1)) {
+        return false;
+    }
+    return true;
+}
+
 static size_t buildInstanceBuffer(const World& world, const uint32_t* faceTex,
                                   InstanceData* instances) {
-    // Desplazamiento que centra el mundo en el origen para que la camara orbite
+    // Desplazamiento que centra el mundo en el origen para que la camara gire
     // alrededor de su centro geometrico.
     const float offset = world.side * 0.5f - 0.5f;
     size_t count = 0;
 
     for (const Block& b : world.blocks) {
-        if (b.state == BlockState::Gone || b.scale <= 0.0f) continue;
-
-        // Descarte de bloques totalmente rodeados: solo se aplica a los que ya
-        // estan asentados, porque los que aun caen se ven desde cualquier lado.
-        if (b.state == BlockState::Placed) {
-            if (world.occupiedAt(b.gx + 1, b.gy, b.gz) &&
-                world.occupiedAt(b.gx - 1, b.gy, b.gz) &&
-                world.occupiedAt(b.gx, b.gy + 1, b.gz) &&
-                world.occupiedAt(b.gx, b.gy - 1, b.gz) &&
-                world.occupiedAt(b.gx, b.gy, b.gz + 1) &&
-                world.occupiedAt(b.gx, b.gy, b.gz - 1)) {
-                continue;
-            }
-        }
+        if (!blockIsVisible(world, b)) continue;
 
         InstanceData& inst = instances[count++];
         inst.x       = static_cast<float>(b.gx) - offset;
         inst.y       = b.posY;
         inst.z       = static_cast<float>(b.gz) - offset;
-        inst.faceTex = faceTex[static_cast<int>(b.id)] | (static_cast<uint32_t>(b.shade) << 24);
+        inst.faceTex = faceTex[static_cast<int>(b.id)] |
+                       (static_cast<uint32_t>(b.shade) << 24);
         inst.scale   = b.scale;
     }
 
     return count;
+}
+
+struct NearShadowView {
+    glm::mat4 lightViewProj{1.0f};
+    glm::vec3 focus{0.0f};
+    float radius = 0.0f;
+};
+
+// Centra el volumen de sombras en la posicion horizontal de la camara. Cuando
+// una toma queda fuera del terreno se usa el punto mas cercano del borde; asi
+// una camara exterior concentra la resolucion en la esquina o lado que ocupa,
+// no en el centro que esta observando.
+static NearShadowView calculateNearShadowView(const World& world,
+                                               const AppConfig& cfg,
+                                               const CameraView& camera,
+                                               const SceneLighting& lighting) {
+    const float worldHalf = std::max(1.0f, world.side * 0.5f - 1.0f);
+    NearShadowView result{};
+    result.focus.x = std::max(-worldHalf, std::min(worldHalf, camera.eye.x));
+    result.focus.z = std::max(-worldHalf, std::min(worldHalf, camera.eye.z));
+    result.focus.y = terrainTopAt(world, result.focus.x, result.focus.z) +
+                     std::max(3.0f, world.height * 0.10f);
+    result.radius = std::min(cfg.shadowDistance,
+                             std::max(18.0f, world.side * 0.70f));
+
+    const glm::vec3 lightDirection = glm::normalize(lighting.direction);
+    const float lightDistance = result.radius * 2.8f + world.height;
+    const glm::vec3 lightEye = result.focus + lightDirection * lightDistance;
+    const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
+    const glm::vec3 lightUp = std::abs(glm::dot(lightDirection, worldUp)) > 0.92f
+                            ? glm::vec3(0.0f, 0.0f, 1.0f)
+                            : worldUp;
+    const glm::mat4 lightView = glm::lookAt(lightEye, result.focus, lightUp);
+    const glm::mat4 lightProjection = glm::ortho(
+        -result.radius, result.radius, -result.radius, result.radius,
+        0.5f, lightDistance + result.radius * 2.5f + world.height);
+    result.lightViewProj = lightProjection * lightView;
+    return result;
+}
+
+// Selecciona los bloques que pueden proyectar sombra sobre la zona visible.
+// Recorre las instancias ya visibles y conserva las que caen dentro del radio.
+static size_t buildNearbyShadowInstances(const InstanceData* source,
+                                         size_t count,
+                                         const glm::vec3& focus,
+                                         float radius,
+                                         std::vector<InstanceData>& output) {
+    // Solo los bloques cercanos al foco de la camara entran al mapa de sombras.
+    // El margen extra evita que un bloque justo en el limite deje de proyectar
+    // sombra sobre la zona visible.
+    const float paddedRadius = radius + 6.0f;
+    const float radiusSquared = paddedRadius * paddedRadius;
+
+    output.clear();
+    output.reserve(count);
+
+    for (size_t i = 0; i < count; ++i) {
+        const float dx = source[i].x - focus.x;
+        const float dz = source[i].z - focus.z;
+        if (dx * dx + dz * dz <= radiusSquared) output.push_back(source[i]);
+    }
+
+    return output.size();
 }
 
 // ============================================================================
@@ -617,6 +1176,12 @@ int main(int argc, char** argv) {
         printUsage(argv[0]);
         return EXIT_SUCCESS;
     }
+    if (cfg.shadowMode == "near" && cfg.lightingMode != "cycle") {
+        std::fprintf(stderr,
+                     "Error: --shadows near requiere --lighting cycle.\n");
+        return EXIT_FAILURE;
+    }
+    // Esta version no usa OpenMP: todo el trabajo ocurre en el hilo principal.
     if (cfg.threads != 0) {
         std::fprintf(stderr,
                      "Aviso: --threads no tiene efecto en la version secuencial.\n");
@@ -701,9 +1266,88 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    const bool dynamicLighting = cfg.lightingMode == "cycle";
+    const bool shadowsEnabled = dynamicLighting && cfg.shadowMode == "near";
+    SkyRenderer skyRenderer;
+    if (dynamicLighting && !skyRenderer.init(error)) {
+        std::fprintf(stderr, "Error al preparar el skybox: %s\n", error.c_str());
+        renderer.destroy();
+        atlas.destroy();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
+
+    constexpr int kShadowMapResolution = 2048;
+    ShadowMap shadowMap;
+    if (shadowsEnabled &&
+        (!shadowMap.init(kShadowMapResolution, error) ||
+         !renderer.enableShadowPass(error))) {
+        std::fprintf(stderr, "Error al preparar las sombras: %s\n", error.c_str());
+        shadowMap.destroy();
+        skyRenderer.destroy();
+        renderer.destroy();
+        atlas.destroy();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
+
+    MobRenderer pigRenderer;
+    MobRenderer cowRenderer;
+    MobRenderer sheepRenderer;
+    MobRenderer sheepWoolRenderer;
+    if (cfg.mobCount > 0 &&
+        (!pigRenderer.init(MobModel::Pig,
+                           assetsDir + "/entity/pig/temperate_pig.png", error) ||
+         !cowRenderer.init(MobModel::Cow,
+                           assetsDir + "/entity/cow/temperate_cow.png", error) ||
+         !sheepRenderer.init(MobModel::Sheep,
+                             assetsDir + "/entity/sheep/sheep.png", error) ||
+         !sheepWoolRenderer.init(MobModel::SheepWool,
+                                 assetsDir + "/entity/sheep/sheep_wool.png", error) ||
+         (shadowsEnabled &&
+          (!pigRenderer.enableShadowPass(error) ||
+           !cowRenderer.enableShadowPass(error) ||
+           !sheepRenderer.enableShadowPass(error))))) {
+        std::fprintf(stderr, "Error al preparar los mobs: %s\n", error.c_str());
+        sheepWoolRenderer.destroy();
+        sheepRenderer.destroy();
+        cowRenderer.destroy();
+        pigRenderer.destroy();
+        shadowMap.destroy();
+        skyRenderer.destroy();
+        renderer.destroy();
+        atlas.destroy();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
+
     std::printf("Texturas   : %s (%d capas, %.1f KB, %.1f ms)\n",
                 assetsDir.c_str(), atlas.layerCount(),
                 atlas.pixelBytes() / 1024.0, atlasMs);
+    std::printf("Ejecucion  : un solo hilo, sin OpenMP\n");
+    if (cfg.cameraMode == "auto") {
+        std::printf("Camara     : automatica | cambio cada %.1f s | %d encuadres\n",
+                    cfg.cameraChangeSeconds, kAutoCameraShotCount);
+    } else {
+        std::printf("Camara     : orbita exterior\n");
+    }
+    std::printf("Mobs       : %d solicitados | cerdos, vacas y ovejas | IA secuencial%s\n",
+                cfg.mobCount, cfg.mobCount == 0 ? " (desactivados)" : "");
+    if (dynamicLighting) {
+        std::printf("Iluminacion: ciclo dia/noche | %.1f s | skybox procedural\n",
+                    cfg.dayCycleSeconds);
+    } else {
+        std::printf("Iluminacion: clasica (use --lighting cycle para activar el ciclo)\n");
+    }
+    if (shadowsEnabled) {
+        std::printf("Sombras    : cercanas | radio %.1f bloques | mapa %dx%d\n",
+                    cfg.shadowDistance, shadowMap.resolution(), shadowMap.resolution());
+    } else {
+        std::printf("Sombras    : desactivadas (use --shadows near con iluminacion cycle)\n");
+    }
 
     // --- 5. Generacion del primer mundo --------------------------------------
     // Semilla: la indicada por el usuario, o una sorteada por el sistema.
@@ -714,6 +1358,11 @@ int main(int argc, char** argv) {
     double genMs = generateWorld(cfg, seed, world);
 
     std::vector<InstanceData> instances(world.blocks.size());
+    std::vector<InstanceData> shadowInstances;
+    std::vector<Mob> mobs;
+    std::vector<MobInstanceData> pigInstances;
+    std::vector<MobInstanceData> cowInstances;
+    std::vector<MobInstanceData> sheepInstances;
 
     std::printf("Mundo      : semilla %u | bioma %s | reticula %dx%dx%d\n"
                 "             bloques %zu (N pedido %ld) | generado en %.1f ms\n",
@@ -734,6 +1383,7 @@ int main(int argc, char** argv) {
     bool   spaceWasDown = false;  // estado previo de ESPACIO (deteccion de flanco)
     size_t drawnBlocks  = 0;
     double cpuMsAccum   = 0.0;   // tiempo de CPU acumulado del fotograma
+    bool   mobsSpawned  = false; // aparecen cuando el terreno queda armado
 
     while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
@@ -775,6 +1425,12 @@ int main(int argc, char** argv) {
             seed = (cfg.seed != 0) ? cfg.seed : randomDevice();
             genMs = generateWorld(cfg, seed, world);
             instances.assign(world.blocks.size(), InstanceData{});
+            shadowInstances.clear();
+            mobs.clear();
+            pigInstances.clear();
+            cowInstances.clear();
+            sheepInstances.clear();
+            mobsSpawned = false;
             liveBlocks = world.blocks.size();
             phase      = Phase::Building;
             cycleStart = glfwGetTime();
@@ -792,44 +1448,103 @@ int main(int argc, char** argv) {
         auto cpuStart = std::chrono::steady_clock::now();
 
         updateWorld(world, elapsed, dt, liveBlocks);
+
+        if (phase == Phase::Holding && cfg.mobCount > 0) {
+            if (!mobsSpawned) {
+                mobs = spawnMobs(world, cfg.mobCount);
+                mobsSpawned = true;
+                std::printf("Mobs activos: %zu de %d solicitados\n",
+                            mobs.size(), cfg.mobCount);
+                std::fflush(stdout);
+            }
+            updateMobsSequential(mobs, world, dt);
+            buildMobInstances(mobs, world, pigInstances, cowInstances, sheepInstances);
+        } else {
+            pigInstances.clear();
+            cowInstances.clear();
+            sheepInstances.clear();
+        }
+
         drawnBlocks = buildInstanceBuffer(world, faceTexTables[world.biomeIndex].data(),
                                           instances.data());
+
+        // --- Camara ----------------------------------------------------------
+        // El modo orbit conserva la toma original. El modo auto alterna entre
+        // encuadres exteriores e interiores con una transicion elevada.
+        CameraView camera = calculateCamera(world, cfg, now);
+
+        DayNightEnvironment environment{};
+        environment.phaseName = "clasica";
+        if (dynamicLighting) {
+            environment = calculateDayNight(world, cfg, now, camera.eye);
+        }
+
+        NearShadowView shadowView{};
+        size_t shadowBlockCount = 0;
+        if (shadowsEnabled) {
+            shadowView = calculateNearShadowView(world, cfg, camera,
+                                                 environment.lighting);
+            shadowBlockCount = buildNearbyShadowInstances(
+                instances.data(), drawnBlocks, shadowView.focus,
+                shadowView.radius, shadowInstances);
+            environment.lighting.shadows = true;
+            environment.lighting.lightViewProj = shadowView.lightViewProj;
+            environment.lighting.shadowTexture = shadowMap.textureId();
+            environment.lighting.shadowStrength = 0.72f;
+            environment.lighting.shadowCenter = shadowView.focus;
+            environment.lighting.shadowRadius = shadowView.radius;
+        }
 
         cpuMsAccum += std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - cpuStart).count();
 
-        // --- Camara: orbita circular alrededor del centro del mundo ----------
-        // La posicion se obtiene con funciones trigonometricas sobre el angulo
-        // que avanza con el tiempo.
         int fbWidth = 0, fbHeight = 0;
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbHeight == 0) fbHeight = 1;
         glViewport(0, 0, fbWidth, fbHeight);
 
-        float orbitRadius = world.side * 1.05f + 14.0f;
-        float orbitHeight = world.height * 0.85f + world.side * 0.30f;
-        float angle       = static_cast<float>(now) * 0.15f;
-
-        glm::vec3 eye(std::cos(angle) * orbitRadius,
-                      orbitHeight,
-                      std::sin(angle) * orbitRadius);
-        glm::vec3 center(0.0f, world.height * 0.30f, 0.0f);
-
         glm::mat4 projection = glm::perspective(
-            glm::radians(55.0f),
+            glm::radians(camera.fovDegrees),
             static_cast<float>(fbWidth) / static_cast<float>(fbHeight),
-            0.5f, orbitRadius * 4.0f + 200.0f);
-        glm::mat4 view     = glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
+            0.5f, world.side * 6.0f + 200.0f);
+        glm::mat4 view     = glm::lookAt(camera.eye, camera.target, camera.up);
         glm::mat4 viewProj = projection * view;
 
         // --- Dibujo -----------------------------------------------------------
-        uint32_t sky = world.biome->skyColor;
-        glClearColor(((sky >> 16) & 0xFF) / 255.0f,
-                     ((sky >> 8)  & 0xFF) / 255.0f,
-                     ( sky        & 0xFF) / 255.0f, 1.0f);
+        if (shadowsEnabled) {
+            shadowMap.beginDepthPass();
+            renderer.drawDepth(shadowInstances.data(), shadowBlockCount,
+                               shadowView.lightViewProj);
+            pigRenderer.drawDepth(pigInstances.data(), pigInstances.size(),
+                                  shadowView.lightViewProj);
+            cowRenderer.drawDepth(cowInstances.data(), cowInstances.size(),
+                                  shadowView.lightViewProj);
+            sheepRenderer.drawDepth(sheepInstances.data(), sheepInstances.size(),
+                                    shadowView.lightViewProj);
+            shadowMap.endDepthPass(fbWidth, fbHeight);
+        }
+
+        if (dynamicLighting) {
+            glClearColor(environment.sky.zenithColor.r,
+                         environment.sky.zenithColor.g,
+                         environment.sky.zenithColor.b, 1.0f);
+        } else {
+            const glm::vec3 skyColor = rgbColor(world.biome->skyColor);
+            glClearColor(skyColor.r, skyColor.g, skyColor.b, 1.0f);
+        }
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        renderer.draw(instances.data(), drawnBlocks, viewProj, atlas.textureId());
+        if (dynamicLighting) skyRenderer.draw(projection, view, environment.sky);
+        renderer.draw(instances.data(), drawnBlocks, viewProj, atlas.textureId(),
+                      environment.lighting);
+        pigRenderer.draw(pigInstances.data(), pigInstances.size(), viewProj,
+                         environment.lighting);
+        cowRenderer.draw(cowInstances.data(), cowInstances.size(), viewProj,
+                         environment.lighting);
+        sheepRenderer.draw(sheepInstances.data(), sheepInstances.size(), viewProj,
+                           environment.lighting);
+        sheepWoolRenderer.draw(sheepInstances.data(), sheepInstances.size(), viewProj,
+                               environment.lighting);
         glfwSwapBuffers(window);
 
         // --- Indicador de FPS en el titulo de la ventana ----------------------
@@ -843,10 +1558,13 @@ int main(int argc, char** argv) {
 
             char title[256];
             std::snprintf(title, sizeof(title),
-                          "Minecraft Screen Saver - Secuencial | FPS %d | %s | "
-                          "bloques %zu / dibujados %zu | CPU %.2f ms | %s",
-                          displayedFps, world.biome->name, world.blocks.size(),
-                          drawnBlocks, cpuMsAccum / frameCount, phaseName);
+                          "Minecraft Screen Saver - Secuencial | 1 hilo | FPS %d | %s | cam %s | luz %s | "
+                          "bloques %zu / dibujados %zu | mobs %zu | CPU %.2f ms | %s",
+                          displayedFps, world.biome->name,
+                          camera.name, environment.phaseName,
+                          world.blocks.size(), drawnBlocks,
+                          pigInstances.size() + cowInstances.size() + sheepInstances.size(),
+                          cpuMsAccum / frameCount, phaseName);
             glfwSetWindowTitle(window, title);
 
             frameCount = 0;
@@ -856,6 +1574,12 @@ int main(int argc, char** argv) {
     }
 
     // --- 7. Liberacion ordenada de recursos ----------------------------------
+    sheepWoolRenderer.destroy();
+    sheepRenderer.destroy();
+    cowRenderer.destroy();
+    pigRenderer.destroy();
+    shadowMap.destroy();
+    skyRenderer.destroy();
     renderer.destroy();
     atlas.destroy();
     glfwDestroyWindow(window);
